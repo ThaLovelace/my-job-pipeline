@@ -265,62 +265,22 @@ except Exception as e:
     st.error(f"❌ โหลด Notion options ไม่ได้: {e}")
     st.stop()
 
-# ── Job Info ─────────────────────────────────────────────
-st.subheader("📋 Job Info")
-
-col1, col2 = st.columns(2)
-with col1:
-    job_title = st.text_input("Job Title *", placeholder="Data Analyst")
-    role_tier = st.selectbox("Role Tier", [""] + opt["job"]["Role Tier"])
-    fit_level = st.selectbox("Fit Level", [""] + opt["job"]["Fit Level"])
-    apply_status = st.selectbox("Apply Status", [""] + opt["job"]["Apply Status"])
-
-with col2:
-    work_location = st.text_input("Work Location", placeholder="Bangkok, On-site")
-    salary_min = st.number_input("Salary Min (฿)", min_value=0, step=1000, value=0)
-    salary_max = st.number_input("Salary Max (฿)", min_value=0, step=1000, value=0)
-    linkedin_url = st.text_input("LinkedIn URL", placeholder="https://linkedin.com/...")
-
-key_tech_stack = st.text_input("Key Tech Stack", placeholder="SQL, Python, Tableau")
-gaps = st.text_area("Gaps to Address", placeholder="สิ่งที่ขาด / ต้องเตรียม", height=80)
-job_notes = st.text_area("Job Notes", placeholder="หมายเหตุเพิ่มเติม", height=80)
-analysis = st.text_area("AI Analysis", placeholder="วาง AI analysis ได้เลยค่ะ", height=120)
-
-st.markdown("---")
-
-# ── Company Info ─────────────────────────────────────────
-st.subheader("🏢 Company Info")
-
-col3, col4 = st.columns(2)
-with col3:
-    company_name = st.text_input("Company Name *", placeholder="Shopee")
-    company_size = st.text_input("Company Size", placeholder="10000+ employees")
-    company_tier = st.selectbox("Company Tier", [""] + opt["company"]["Company Tier"])
-    industry = st.selectbox("Industry", [""] + opt["company"]["Industry"])
-
-with col4:
-    location = st.text_input("Location", placeholder="Bangkok, Thailand")
-    wfh_policy = st.selectbox("WFH Policy", [""] + opt["company"]["WFH Policy"])
-    website = st.text_input("Website", placeholder="https://careers.shopee.co.th")
-
-company_notes = st.text_area("Company Notes", placeholder="Glassdoor score, culture notes ฯลฯ", height=80)
-
-st.markdown("---")
-
-# ── Submit ───────────────────────────────────────────────
-if st.button("🚀 Add to Notion + Rerank"):
-    if not job_title.strip():
-        st.error("กรุณาใส่ Job Title ค่ะ")
-        st.stop()
-    if not company_name.strip():
-        st.error("กรุณาใส่ Company Name ค่ะ")
-        st.stop()
+# สร้างฟังก์ชัน Submit เพื่อให้เรียกใช้ได้ทั้งจากการวางโค้ดและการกรอกฟอร์ม
+def submit_to_notion(job_data, company_data):
+    if not job_data.get("job_title", "").strip():
+        st.error("กรุณาตรวจสอบว่ามี Job Title ค่ะ")
+        return
+    if not company_data.get("company_name", "").strip():
+        st.error("กรุณาตรวจสอบว่ามี Company Name ค่ะ")
+        return
 
     log_lines = []
     def log(msg):
         log_lines.append(msg)
 
     with st.spinner("กำลัง sync กับ Notion..."):
+        company_name = company_data["company_name"]
+        job_title = job_data["job_title"]
 
         # 1. search / create company
         log(f"🔍 ค้นหา: {company_name}")
@@ -330,26 +290,108 @@ if st.button("🚀 Add to Notion + Rerank"):
             log("✅ เจอบริษัทใน Notion แล้ว")
         else:
             log("➕ สร้างบริษัทใหม่...")
-            company_data = {
-                "company_name": company_name,
-                "company_size": company_size,
-                "company_tier": company_tier,
-                "industry": industry,
-                "location": location,
-                "wfh_policy": wfh_policy,
-                "website": website,
-                "notes": company_notes,
-            }
             company_id, err = create_company(company_data, opt)
             if err:
                 st.error(f"❌ สร้างบริษัทไม่สำเร็จ: {err}")
-                st.stop()
+                return
             log(f"✅ สร้างบริษัท {company_name} สำเร็จ")
 
         # 2. create job
-        job_data = {
+        job_data["company_name"] = company_name
+        ok, err = create_job(job_data, company_id, opt)
+        if not ok:
+            st.error(f"❌ สร้าง job ไม่สำเร็จ: {err}")
+            return
+        log(f"✅ เพิ่ม job: {job_title} @ {company_name}")
+
+        # 3. rerank
+        log("\n📊 Reranking jobs...")
+        rerank_all_jobs(opt, log)
+        log("\n🎉 เสร็จแล้ว!")
+
+    st.success("เพิ่มลง Notion สำเร็จแล้วค่ะ! ✨")
+    with st.expander("ดู log"):
+        st.code("\n".join(log_lines))
+
+
+# ── Tabs Navigation ──────────────────────────────────────
+tab1, tab2 = st.tabs(["📝 Paste Python Dict (Fast)", "✍️ Manual Form"])
+
+# --- TAB 1: สำหรับวางโค้ด ---
+with tab1:
+    st.markdown("วางโค้ด `job_data` และ `company_data` ลงในช่องด้านล่างแล้วกด Submit ได้เลยค่ะ")
+    raw_code = st.text_area(
+        "Paste Code Here",
+        height=450,
+        placeholder="job_data = {\n  'job_title': '...', \n  ...\n}\n\ncompany_data = {\n  ...\n}",
+        label_visibility="collapsed"
+    )
+
+    if st.button("🚀 Add to Notion + Rerank", key="btn_code"):
+        if not raw_code.strip():
+            st.error("กรุณาวางโค้ดก่อนค่ะ")
+            st.stop()
+
+        local_vars = {}
+        try:
+            # รัน string ให้กลายเป็นตัวแปร Python
+            exec(raw_code, {}, local_vars)
+            
+            j_data = local_vars.get("job_data")
+            c_data = local_vars.get("company_data")
+
+            if not isinstance(j_data, dict) or not isinstance(c_data, dict):
+                st.error("❌ โค้ดไม่ถูกต้อง: ต้องมีตัวแปร `job_data` และ `company_data` ที่เป็นรูปแบบ Dictionary ค่ะ")
+                st.stop()
+
+            submit_to_notion(j_data, c_data)
+            
+        except Exception as e:
+            st.error(f"❌ เกิดข้อผิดพลาดในการอ่านโค้ด: {e}")
+
+
+# --- TAB 2: สำหรับกรอกฟอร์มแบบเดิม ---
+with tab2:
+    st.subheader("📋 Job Info")
+    col1, col2 = st.columns(2)
+    with col1:
+        job_title = st.text_input("Job Title *", placeholder="Data Analyst")
+        role_tier = st.selectbox("Role Tier", [""] + opt["job"]["Role Tier"])
+        fit_level = st.selectbox("Fit Level", [""] + opt["job"]["Fit Level"])
+        apply_status = st.selectbox("Apply Status", [""] + opt["job"]["Apply Status"])
+
+    with col2:
+        work_location = st.text_input("Work Location", placeholder="Bangkok, On-site")
+        salary_min = st.number_input("Salary Min (฿)", min_value=0, step=1000, value=0)
+        salary_max = st.number_input("Salary Max (฿)", min_value=0, step=1000, value=0)
+        linkedin_url = st.text_input("LinkedIn URL", placeholder="https://linkedin.com/...")
+
+    key_tech_stack = st.text_input("Key Tech Stack", placeholder="SQL, Python, Tableau")
+    gaps = st.text_area("Gaps to Address", placeholder="สิ่งที่ขาด / ต้องเตรียม", height=80)
+    job_notes = st.text_area("Job Notes", placeholder="หมายเหตุเพิ่มเติม", height=80)
+    analysis = st.text_area("AI Analysis", placeholder="วาง AI analysis ได้เลยค่ะ", height=120)
+
+    st.markdown("---")
+    st.subheader("🏢 Company Info")
+
+    col3, col4 = st.columns(2)
+    with col3:
+        company_name = st.text_input("Company Name *", placeholder="Shopee")
+        company_size = st.text_input("Company Size", placeholder="10000+ employees")
+        company_tier = st.selectbox("Company Tier", [""] + opt["company"]["Company Tier"])
+        industry = st.selectbox("Industry", [""] + opt["company"]["Industry"])
+
+    with col4:
+        location = st.text_input("Location", placeholder="Bangkok, Thailand")
+        wfh_policy = st.selectbox("WFH Policy", [""] + opt["company"]["WFH Policy"])
+        website = st.text_input("Website", placeholder="https://careers.shopee.co.th")
+
+    company_notes = st.text_area("Company Notes", placeholder="Glassdoor score, culture notes ฯลฯ", height=80)
+
+    st.markdown("---")
+    if st.button("🚀 Add to Notion + Rerank", key="btn_manual"):
+        j_data = {
             "job_title": job_title,
-            "company_name": company_name,
             "role_tier": role_tier,
             "fit_level": fit_level,
             "apply_status": apply_status,
@@ -362,17 +404,14 @@ if st.button("🚀 Add to Notion + Rerank"):
             "notes": job_notes,
             "analysis": analysis,
         }
-        ok, err = create_job(job_data, company_id, opt)
-        if not ok:
-            st.error(f"❌ สร้าง job ไม่สำเร็จ: {err}")
-            st.stop()
-        log(f"✅ เพิ่ม job: {job_title} @ {company_name}")
-
-        # 3. rerank
-        log("\n📊 Reranking jobs...")
-        rerank_all_jobs(opt, log)
-        log("\n🎉 เสร็จแล้ว!")
-
-    st.success("เพิ่มลง Notion สำเร็จแล้วค่ะ! ✨")
-    with st.expander("ดู log"):
-        st.code("\n".join(log_lines))
+        c_data = {
+            "company_name": company_name,
+            "company_size": company_size,
+            "company_tier": company_tier,
+            "industry": industry,
+            "location": location,
+            "wfh_policy": wfh_policy,
+            "website": website,
+            "notes": company_notes,
+        }
+        submit_to_notion(j_data, c_data)
