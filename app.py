@@ -163,15 +163,19 @@ def create_company(d, opt):
     return result["id"], None
 
 def create_job(d, company_page_id, opt):
+    # สร้างฟังก์ชันย่อยช่วยจัดการล้างเครื่องหมาย Comma (,) ออกจากค่า Select Option
+    def sel(raw, choices):
+        return sanitize_select(fuzzy_match(raw, choices))
+
     props = {
         "Job Title":       {"title": [{"text": {"content": d["job_title"]}}]},
         "Company":         {"relation": [{"id": company_page_id}]},
-        "Role Tier":       {"select": {"name": fuzzy_match(d.get("role_tier", ""),    opt["job"]["Role Tier"])}},
-        "Fit Level":       {"select": {"name": fuzzy_match(d.get("fit_level", ""),    opt["job"]["Fit Level"])}},
+        "Role Tier":       {"select": {"name": sel(d.get("role_tier", ""),    opt["job"]["Role Tier"])}},
+        "Fit Level":       {"select": {"name": sel(d.get("fit_level", ""),    opt["job"]["Fit Level"])}},
         "Apply Priority":  {"number": None},
         "Salary Min":      {"number": d.get("salary_min") or None},
         "Salary Max":      {"number": d.get("salary_max") or None},
-        "Apply Status":    {"select": {"name": fuzzy_match(d.get("apply_status", ""), opt["job"]["Apply Status"])}},
+        "Apply Status":    {"select": {"name": sel(d.get("apply_status", ""), opt["job"]["Apply Status"])}},
         "Work Location":   {"rich_text": [{"text": {"content": d.get("work_location", "")}}]},
         "Key Tech Stack":  {"rich_text": [{"text": {"content": d.get("key_tech_stack", "")}}]},
         "Gaps to Address": {"rich_text": [{"text": {"content": d.get("gaps", "")}}]},
