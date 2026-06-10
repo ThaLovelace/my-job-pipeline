@@ -670,35 +670,61 @@ def analysis_to_notion_dicts(a, job_url):
 
 
 with tab3:
-    st.markdown("อัปโหลด CSV รายการ URL งาน → ระบบ fetch JD → วิเคราะห์ด้วย Gemini → push Notion ทีละงานค่ะ")
+    st.markdown("วิเคราะห์ job จาก URL เดี่ยว หรืออัปโหลด CSV รายการ URL → Gemini → Notion ค่ะ")
 
     if not GEMINI_API_KEY:
         st.warning("⚠️ ยังไม่มี `GEMINI_API_KEY` ใน Streamlit Secrets — ไปเพิ่มที่ Settings → Secrets ก่อนนะคะ")
 
-    uploaded    = st.file_uploader("อัปโหลด Job_Listings.csv", type="csv")
-    delay = st.slider("หน่วงเวลาระหว่าง request (วินาที)", 5, 30, 12,
-                  help="Gemini free tier limit ~10 req/min — แนะนำ 12+ วินาที")
+    delay       = st.slider("หน่วงเวลาระหว่าง request (วินาที)", 5, 30, 12,
+                            help="Gemini free tier limit ~10 req/min — แนะนำ 12+ วินาที")
     push_notion = st.checkbox("Push เข้า Notion อัตโนมัติ", value=True)
 
-    if uploaded and st.button("🚀 Start Batch Analyze", key="btn_batch"):
-        import csv, io
+    # ── input mode ──────────────────────────────────────────
+    mode = st.radio("วิธีใส่ job", ["🔗 วาง URL เดี่ยว", "📂 อัปโหลด CSV"], horizontal=True)
 
-        content = uploaded.read().decode("utf-8-sig")
-        reader  = csv.DictReader(io.StringIO(content))
-        jobs, seen, dupes = [], set(), 0
-        for row in reader:
-            url = (row.get("URL") or "").strip()
-            if not url:
-                continue
-            base = url.split("?")[0].rstrip("/")
-            if base in seen:
-                dupes += 1
-                continue
-            seen.add(base)
-            jobs.append({"url": url, "name": (row.get("Name") or "").strip(), "base": base})
+    jobs = []  # list of {"url": ..., "name": ...}
 
-        st.info(f"พบ **{len(jobs)}** unique jobs ({dupes} duplicates ถูกตัดออก)")
+    if mode == "🔗 วาง URL เดี่ยว":
+        raw_urls = st.text_area(
+            "วาง URL (ได้หลายบรรทัด — 1 URL ต่อบรรทัด)",
+            height=150,
+            placeholder="https://th.jobsdb.com/job/12345\nhttps://www.jobthai.com/en/job/67890"
+        )
+        if raw_urls.strip():
+            seen = set()
+            for line in raw_urls.strip().splitlines():
+                url = line.strip()
+                if not url:
+                    continue
+                base = url.split("?")[0].rstrip("/")
+                if base not in seen:
+                    seen.add(base)
+                    jobs.append({"url": url, "name": url[:60]})
+            if jobs:
+                st.info(f"พบ **{len(jobs)}** URL")
 
+    else:  # CSV mode
+        uploaded = st.file_uploader("อัปโหลด Job_Listings.csv", type="csv")
+        if uploaded:
+            import csv, io
+            content = uploaded.read().decode("utf-8-sig")
+            reader  = csv.DictReader(io.StringIO(content))
+            seen, dupes = set(), 0
+            for row in reader:
+                url = (row.get("URL") or "").strip()
+                if not url:
+                    continue
+                base = url.split("?")[0].rstrip("/")
+                if base in seen:
+                    dupes += 1
+                    continue
+                seen.add(base)
+                jobs.append({"url": url, "name": (row.get("Name") or "").strip()})
+            if jobs:
+                st.info(f"พบ **{len(jobs)}** unique jobs ({dupes} duplicates ถูกตัดออก)")
+
+    # ── run button ───────────────────────────────────────────
+    if jobs and st.button("🚀 Start Batch Analyze", key="btn_batch"):
         stats    = {"ok": 0, "err": 0, "notion_ok": 0, "notion_err": 0}
         results  = []
         progress = st.progress(0, text="เริ่มต้น...")
@@ -771,15 +797,12 @@ with tab3:
         progress.progress(1.0, text="เสร็จแล้ว! ✨")
         st.success(f"เสร็จแล้ว! ✅ {stats['ok']} analyzed | 📤 {stats['notion_ok']} pushed | ❌ {stats['err']} errors")
 
-        # quick insights
         all_a = [r["analysis"] for r in results if r.get("status") == "ok"]
         if all_a:
             col_a, col_b, col_c = st.columns(3)
             col_a.metric("APPLY",     sum(1 for a in all_a if a.get("apply_decision") == "APPLY"))
             col_b.metric("WATCHLIST", sum(1 for a in all_a if a.get("apply_decision") == "WATCHLIST"))
             col_c.metric("PASS",      sum(1 for a in all_a if a.get("apply_decision") == "PASS"))
-            fg = sum(1 for a in all_a if a.get("fresh_grad_welcome"))
-            st.caption(f"Fresh-grad friendly: {fg}/{len(all_a)} jobs")
             all_gaps = [g for a in all_a for g in a.get("gap_skills", [])]
             gc = {}
             for g in all_gaps:
@@ -789,7 +812,6 @@ with tab3:
             if top:
                 st.caption(f"Top skill gaps: {', '.join(f'{g}({n})' for g,n in top)}")
 
-        # download JSON
         st.download_button(
             "⬇️ Download jobs_analyzed.json",
             data=json.dumps(results, ensure_ascii=False, indent=2),
