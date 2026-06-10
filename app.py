@@ -257,9 +257,12 @@ def get_listing_status_map():
     """คืน dict mapping ชื่อ canonical → ชื่อจริงใน Notion (fuzzy)"""
     options = _get_listing_status_options()
     return {
-        "consider":   fuzzy_match("Consider",  options, cutoff=0.5) or "Consider",
-        "added":      fuzzy_match("Added",      options, cutoff=0.5) or "Added",
-        "not_apply":  fuzzy_match("Not Apply",  options, cutoff=0.5) or "Not Apply",
+        "consider":    fuzzy_match("Consider",    options, cutoff=0.5) or "Consider",
+        "added":       fuzzy_match("Added",        options, cutoff=0.5) or "Added",
+        "not_apply":   fuzzy_match("Not Apply",    options, cutoff=0.5) or "Not Apply",
+        # error states — ออกจาก queue (status ไม่ว่าง) แต่ไม่ใช่ผลสำเร็จ
+        "fetch_error": fuzzy_match("Fetch Error",  options, cutoff=0.5) or "Fetch Error",
+        "llm_error":   fuzzy_match("LLM Error",    options, cutoff=0.5) or "LLM Error",
     }
 
 def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_key="consider", error_note=""):
@@ -818,17 +821,30 @@ def fetch_jd(url):
 def _call_llm_raw(prompt, retries=2):
     """Low-level LLM call — returns raw text string or raises RuntimeError
     ใช้ Groq API (ฟรี) — llama-3.3-70b-versatile
+
+    Rate limit strategy (Groq Free tier):
+    - 429 → รอตาม retry-after header จริงๆ (ไม่จำกัดรอบ) แล้วลองใหม่ใน model เดิม
+    - ถ้า retry-after > 120 วินาที → switch model ทันที (เพราะ TPM limit อาจรีเซตต่างกัน)
+    - ลอง llama-3.1-8b-instant เป็น fallback เมื่อ primary model ยังติด rate limit
+    - 503/529 → backoff สั้น แล้วลองใหม่
     """
     if not GROQ_API_KEY:
         raise RuntimeError("ไม่มี GROQ_API_KEY ใน secrets")
 
     models = [
-        "llama-3.3-70b-versatile",  # ฉลาด instruction following ดี
-        "llama-3.1-8b-instant",     # fallback เมื่อ rate limit
+        "llama-3.3-70b-versatile",  # primary — ฉลาด instruction following ดี
+        "llama-3.1-8b-instant",     # fallback — เร็วกว่า, quota แยกกัน
     ]
     last_err = ""
+
     for model in models:
-        for attempt in range(retries):
+        # 429 ใน model เดิม retry ได้ไม่จำกัดรอบ (รอจริงตาม header)
+        # แต่ cap ไว้ที่ 5 ครั้งต่อ model ก่อน switch
+        max_429_waits = 5
+        rate_limit_count = 0
+
+        attempt = 0
+        while attempt < retries + rate_limit_count:
             resp = None
             try:
                 resp = requests.post(
@@ -847,23 +863,42 @@ def _call_llm_raw(prompt, retries=2):
                 )
                 resp.raise_for_status()
                 return resp.json()["choices"][0]["message"]["content"]
-            except requests.exceptions.HTTPError as e:
+
+            except requests.exceptions.HTTPError:
                 status = resp.status_code if resp is not None else 0
                 last_err = f"{model} HTTP {status}"
-                if status == 429 and attempt < retries - 1:
+
+                if status == 429:
+                    rate_limit_count += 1
                     retry_after = int(resp.headers.get("retry-after", 30))
+                    if retry_after > 120 or rate_limit_count > max_429_waits:
+                        # รอนานเกินไป หรือโดนซ้ำหลายรอบแล้ว → switch model
+                        last_err = f"{model} rate-limited (retry-after={retry_after}s) → switching model"
+                        break
+                    # รอตาม header จริงๆ แล้วลองใหม่ใน model เดิม
                     time.sleep(retry_after + 2)
+                    attempt += 1
                     continue
-                if status in (503, 529) and attempt < retries - 1:
-                    time.sleep(10)
-                    continue
+
+                if status in (503, 529):
+                    if attempt < retries - 1:
+                        time.sleep(10)
+                        attempt += 1
+                        continue
+                    break
+
+                # HTTP error อื่น → break ออกไป switch model
                 break
+
             except requests.exceptions.Timeout:
                 last_err = f"{model} timeout"
                 break
             except Exception as ex:
                 last_err = f"{model}: {ex}"
                 break
+
+            attempt += 1
+
     raise RuntimeError(f"Groq ล้มเหลวทุก model — {last_err}")
 
 
@@ -1396,8 +1431,11 @@ with tab3:
                     stats["err"] += 1
                     results.append({"url": url, "name": name, "status": "error", "error": fetch_err})
                     if JOB_LISTING_DB_ID:
-                        upsert_job_listing(url, error_note=f"Fetch failed: {fetch_err}")
-                        add_log(f"  📋 Listing: บันทึก error แล้ว")
+                        # ตั้ง status = "fetch_error" เพื่อให้ออกจาก queue ถาวร
+                        # (fetch_pending_listings กรอง "no status" เท่านั้น → งานนี้จะไม่วนกลับมา)
+                        upsert_job_listing(url, status_key="fetch_error",
+                                           error_note=f"Fetch failed: {fetch_err}")
+                        add_log(f"  📋 Listing: fetch_error (ออกจาก queue แล้ว — retry ได้ใส่ JD เองด้านล่าง)")
                     if i < len(jobs_to_run) - 1:
                         time.sleep(delay)
                     continue
@@ -1414,8 +1452,11 @@ with tab3:
                 stats["err"] += 1
                 results.append({"url": url, "name": name, "status": "error", "error": analysis["error"]})
                 if JOB_LISTING_DB_ID:
-                    upsert_job_listing(url, jd_raw=jd[:2000] if 'jd' in dir() else "",
+                    # ตั้ง status = "llm_error" เพื่อออกจาก queue ถาวร
+                    upsert_job_listing(url, status_key="llm_error",
+                                       jd_raw=jd[:2000] if 'jd' in dir() else "",
                                        error_note=f"LLM error: {analysis.get('error','')}")
+                    add_log(f"  📋 Listing: llm_error (ออกจาก queue แล้ว)")
             else:
                 jt = analysis.get("job_title", "?")
                 cn = analysis.get("company_name", "?")
