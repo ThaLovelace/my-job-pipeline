@@ -217,7 +217,7 @@ def create_job(d, company_page_id, opt):
             "heading_2": {"rich_text": [{"text": {"content": "AI Analysis"}}]}
         })
         text = d["analysis"].strip()
-        for chunk in [text[i:i+2000] for i in range(0, len(text), 2000)]:
+        for chunk in [text[i:i+1999] for i in range(0, len(text), 1999)]:
             children.append({
                 "object": "block", "type": "paragraph",
                 "paragraph": {"rich_text": [{"text": {"content": chunk}}]}
@@ -606,43 +606,54 @@ def fetch_jd(url):
     return None, " | ".join(errors)
 
 
-def analyze_with_llm(jd_text, retries=3):
+def analyze_with_llm(jd_text, retries=2):
     prompt = ANALYSIS_PROMPT.format(profile=CANDIDATE_PROFILE, jd_text=jd_text[:5000])
 
     # ── ลอง OpenRouter ก่อน ──────────────────────────────
     if OPENROUTER_API_KEY:
-        for attempt in range(retries):
-            resp = None
-            try:
-                resp = requests.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": "poolside/laguna-m.1:free",
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 8192,
-                        "temperature": 0.3,
-                    },
-                    timeout=90
-                )
-                resp.raise_for_status()
-                raw = resp.json()["choices"][0]["message"]["content"]
-                raw = re.sub(r"^```json\s*", "", raw.strip())
-                raw = re.sub(r"```\s*$", "", raw.strip())
-                return _parse_llm_json(raw)
-            except requests.exceptions.HTTPError as e:
-                if resp is not None and resp.status_code == 429 and attempt < retries - 1:
-                    time.sleep((attempt + 1) * 30)
-                    continue
-                if resp is not None and resp.status_code == 503 and attempt < retries - 1:
-                    time.sleep((attempt + 1) * 10)
-                    continue
-                return {"error": f"OpenRouter error: {e}"}
-            except Exception as e:
-                return {"error": f"OpenRouter error: {e}"}
+        # เรียง model จากเร็ว → ช้า, ถ้าตัวแรก fail/timeout ลองตัวถัดไป
+        models = [
+            "google/gemini-2.0-flash-exp:free",
+            "meta-llama/llama-3.3-70b-instruct:free",
+            "mistralai/mistral-7b-instruct:free",
+        ]
+        for model in models:
+            for attempt in range(retries):
+                resp = None
+                try:
+                    resp = requests.post(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": model,
+                            "messages": [{"role": "user", "content": prompt}],
+                            "max_tokens": 4096,
+                            "temperature": 0.3,
+                        },
+                        timeout=45  # fail fast แล้วลอง model ถัดไป
+                    )
+                    resp.raise_for_status()
+                    raw = resp.json()["choices"][0]["message"]["content"]
+                    raw = re.sub(r"^```json\s*", "", raw.strip())
+                    raw = re.sub(r"```\s*$", "", raw.strip())
+                    return _parse_llm_json(raw)
+                except requests.exceptions.HTTPError as e:
+                    status = resp.status_code if resp is not None else 0
+                    if status == 429 and attempt < retries - 1:
+                        time.sleep(15)
+                        continue
+                    if status in (503, 529) and attempt < retries - 1:
+                        time.sleep(5)
+                        continue
+                    break  # HTTP error อื่น → ลอง model ถัดไป
+                except requests.exceptions.Timeout:
+                    break  # timeout → ลอง model ถัดไปเลย
+                except Exception:
+                    break
+        # OpenRouter ล้มเหลวทุก model → fall through ไป Gemini
 
     # ── fallback: Gemini direct ───────────────────────────
     if not GEMINI_API_KEY:
