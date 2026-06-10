@@ -512,6 +512,7 @@ JD:
 
 
 def fetch_jd(url):
+    """Returns (content, error_message). error_message is None on success."""
     hdrs = {
         "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                        "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -524,9 +525,9 @@ def fetch_jd(url):
         "Referer": "https://www.google.com/",
     }
     if "facebook.com" in url:
-        return f"[Facebook — กรุณา copy JD มาวางเอง]\nURL: {url}"
+        return None, "Facebook URL — กรุณา copy JD มาวางเองค่ะ"
     if "linkedin.com" in url:
-        return f"[LinkedIn — กรุณา copy JD มาวางเอง]\nURL: {url}"
+        return None, "LinkedIn URL — กรุณา copy JD มาวางเองค่ะ"
     try:
         resp = requests.get(url, headers=hdrs, timeout=15)
         resp.raise_for_status()
@@ -536,18 +537,29 @@ def fetch_jd(url):
         if "jobsdb.com" in url:
             section = soup.find("div", {"data-automation": "jobAdDetails"})
             if section:
-                return section.get_text(separator="\n", strip=True)[:6000]
+                return section.get_text(separator="\n", strip=True)[:6000], None
+            # jobsdb อาจ render ด้วย JS — fallback ไป main content
         if "jobthai.com" in url:
             section = soup.find("div", class_=re.compile("job-detail|detail-content", re.I))
             if section:
-                return section.get_text(separator="\n", strip=True)[:6000]
+                return section.get_text(separator="\n", strip=True)[:6000], None
         main = soup.find("main") or soup.find("article") or soup.body
         if main:
             text = main.get_text(separator="\n", strip=True)
-            return re.sub(r"\n{3,}", "\n\n", text)[:6000]
+            text = re.sub(r"\n{3,}", "\n\n", text)[:6000]
+            if len(text.strip()) < 100:
+                return None, "ดึง content ได้แต่น้อยมาก — อาจเป็น JS-rendered page"
+            return text, None
+    except requests.exceptions.HTTPError as e:
+        status = e.response.status_code if e.response is not None else "?"
+        if status == 403:
+            return None, f"403 Forbidden — เว็บนี้บล็อก bot scraping ค่ะ กรุณา copy JD มาวางเอง"
+        if status == 404:
+            return None, f"404 Not Found — URL อาจหมดอายุแล้ว"
+        return None, f"HTTP {status}: {e}"
     except Exception as e:
-        return f"[Fetch error: {e}]\nURL: {url}"
-    return "[ไม่สามารถดึง content ได้]"
+        return None, f"Fetch error: {e}"
+    return None, "ไม่สามารถดึง content ได้"
 
 
 def analyze_with_llm(jd_text, retries=3):
@@ -797,13 +809,21 @@ with tab3:
 
             add_log(f"\n[{i+1}/{len(jobs)}] {name[:55]}")
             add_log(f"  🌐 Fetching JD...")
-            jd = fetch_jd(url)
+            jd, fetch_err = fetch_jd(url)
+            if fetch_err:
+                add_log(f"  ❌ Fetch failed: {fetch_err}")
+                add_log(f"  ⏭️ ข้ามไปก่อนเลยค่ะ — ไม่ส่งเข้า LLM")
+                stats["err"] += 1
+                results.append({"url": url, "name": name, "status": "error", "error": fetch_err})
+                if i < len(jobs) - 1:
+                    time.sleep(delay)
+                continue
             add_log(f"  📄 {jd[:80].replace(chr(10),' ')}...")
 
             add_log(f"  🤖 Analyzing with LLM...")
             analysis = analyze_with_llm(jd)
 
-            if "error" in analysis and "job_title" not in analysis:
+            if "error" in analysis and analysis.get("job_title", "Unknown") == "Unknown" and analysis.get("company_name", "Unknown") == "Unknown":
                 add_log(f"  ❌ {analysis['error']}")
                 stats["err"] += 1
                 results.append({"url": url, "name": name, "status": "error", "error": analysis["error"]})
