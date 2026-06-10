@@ -604,8 +604,12 @@ def analyze_with_gemini(jd_text, retries=3):
                 }
 
         except requests.exceptions.HTTPError as e:
-            if resp.status_code in (429, 503) and attempt < retries - 1:
-                wait = (attempt + 1) * 10
+            if resp.status_code == 429 and attempt < retries - 1:
+                wait = (attempt + 1) * 30  # 429: 30s → 60s → 90s (นานกว่าเดิม)
+                time.sleep(wait)
+                continue
+            elif resp.status_code == 503 and attempt < retries - 1:
+                wait = (attempt + 1) * 10  # 503: 10s → 20s → 30s
                 time.sleep(wait)
                 continue
             return {"error": str(e)}
@@ -672,8 +676,8 @@ with tab3:
         st.warning("⚠️ ยังไม่มี `GEMINI_API_KEY` ใน Streamlit Secrets — ไปเพิ่มที่ Settings → Secrets ก่อนนะคะ")
 
     uploaded    = st.file_uploader("อัปโหลด Job_Listings.csv", type="csv")
-    delay       = st.slider("หน่วงเวลาระหว่าง request (วินาที)", 3, 15, 5,
-                            help="เพิ่มถ้าเจอ rate limit จาก Gemini")
+    delay = st.slider("หน่วงเวลาระหว่าง request (วินาที)", 5, 30, 12,
+                  help="Gemini free tier limit ~10 req/min — แนะนำ 12+ วินาที")
     push_notion = st.checkbox("Push เข้า Notion อัตโนมัติ", value=True)
 
     if uploaded and st.button("🚀 Start Batch Analyze", key="btn_batch"):
