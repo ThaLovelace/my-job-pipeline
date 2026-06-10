@@ -609,14 +609,16 @@ def fetch_jd(url):
 def analyze_with_llm(jd_text, retries=2):
     prompt = ANALYSIS_PROMPT.format(profile=CANDIDATE_PROFILE, jd_text=jd_text[:5000])
 
-    # ── ลอง OpenRouter ก่อน ──────────────────────────────
+    # ── OpenRouter ──────────────────────────────────────────
     if OPENROUTER_API_KEY:
-        # เรียง model จากเร็ว → ช้า, ถ้าตัวแรก fail/timeout ลองตัวถัดไป
+        # เรียง model จากดี → สำรอง; openrouter/auto = ให้ OpenRouter เลือก free model เองค่ะ
         models = [
-            "google/gemini-2.0-flash-exp:free",
+            "google/gemma-4-31b-it:free",
             "meta-llama/llama-3.3-70b-instruct:free",
-            "mistralai/mistral-7b-instruct:free",
+            "deepseek/deepseek-r1-distill-llama-70b:free",
+            "openrouter/auto",                            # fallback: OpenRouter เลือกเอง
         ]
+        last_err = ""
         for model in models:
             for attempt in range(retries):
                 resp = None
@@ -633,7 +635,7 @@ def analyze_with_llm(jd_text, retries=2):
                             "max_tokens": 4096,
                             "temperature": 0.3,
                         },
-                        timeout=45  # fail fast แล้วลอง model ถัดไป
+                        timeout=60
                     )
                     resp.raise_for_status()
                     raw = resp.json()["choices"][0]["message"]["content"]
@@ -642,20 +644,25 @@ def analyze_with_llm(jd_text, retries=2):
                     return _parse_llm_json(raw)
                 except requests.exceptions.HTTPError as e:
                     status = resp.status_code if resp is not None else 0
+                    last_err = f"{model} HTTP {status}"
                     if status == 429 and attempt < retries - 1:
                         time.sleep(15)
                         continue
                     if status in (503, 529) and attempt < retries - 1:
                         time.sleep(5)
                         continue
-                    break  # HTTP error อื่น → ลอง model ถัดไป
-                except requests.exceptions.Timeout:
-                    break  # timeout → ลอง model ถัดไปเลย
-                except Exception:
                     break
-        # OpenRouter ล้มเหลวทุก model → fall through ไป Gemini
+                except requests.exceptions.Timeout:
+                    last_err = f"{model} timeout"
+                    break
+                except Exception as e:
+                    last_err = f"{model}: {e}"
+                    break
+        # ล้มทุก model — ไม่มี Gemini key ให้ return error เลยค่ะ
+        if not GEMINI_API_KEY:
+            return {"error": f"OpenRouter ล้มเหลวทุก model ({last_err}) และไม่มี GEMINI_API_KEY"}
 
-    # ── fallback: Gemini direct ───────────────────────────
+    # ── fallback: Gemini direct ─────────────────────────────
     if not GEMINI_API_KEY:
         return {"error": "ไม่มี OPENROUTER_API_KEY หรือ GEMINI_API_KEY ใน secrets"}
 
