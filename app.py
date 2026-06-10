@@ -54,10 +54,11 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── config ───────────────────────────────────────────────
-NOTION_TOKEN       = st.secrets["NOTION_TOKEN"]
-JOB_PIPELINE_DB_ID = st.secrets["JOB_PIPELINE_DB_ID"]
-COMPANIES_DB_ID    = st.secrets["COMPANIES_DB_ID"]
-GEMINI_API_KEY     = st.secrets.get("GEMINI_API_KEY", "")
+NOTION_TOKEN        = st.secrets["NOTION_TOKEN"]
+JOB_PIPELINE_DB_ID  = st.secrets["JOB_PIPELINE_DB_ID"]
+COMPANIES_DB_ID     = st.secrets["COMPANIES_DB_ID"]
+GEMINI_API_KEY      = st.secrets.get("GEMINI_API_KEY", "")
+OPENROUTER_API_KEY  = st.secrets.get("OPENROUTER_API_KEY", "")
 
 HEADERS = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
@@ -146,7 +147,7 @@ def search_company(name):
 def create_company(d, opt):
     def sel(raw, choices):
         v = sanitize_select(fuzzy_match(raw, choices))
-        return v if v else None  # คืน None ถ้าว่าง
+        return v if v else None
 
     props = {
         "Company Name": {"title": [{"text": {"content": d["company_name"]}}]},
@@ -154,7 +155,7 @@ def create_company(d, opt):
         "Notes":        {"rich_text": [{"text": {"content": d.get("notes", "")}}]},
     }
 
-    # ใส่ select เฉพาะตอนที่มีค่าเท่านั้น — Notion จะ error ถ้าส่ง name: ""
+    # ใส่ select เฉพาะเมื่อมีค่า — Notion error ถ้าส่ง name: ""
     for field, key in [
         ("Company Size", "company_size"),
         ("Company Tier", "company_tier"),
@@ -176,26 +177,40 @@ def create_company(d, opt):
     return result["id"], None
 
 def create_job(d, company_page_id, opt):
-    # สร้างฟังก์ชันย่อยช่วยจัดการล้างเครื่องหมาย Comma (,) ออกจากค่า Select Option
     def sel(raw, choices):
-        return sanitize_select(fuzzy_match(raw, choices))
+        v = sanitize_select(fuzzy_match(raw, choices))
+        return v if v else None
 
     props = {
         "Job Title":       {"title": [{"text": {"content": d["job_title"]}}]},
         "Company":         {"relation": [{"id": company_page_id}]},
-        "Role Tier":       {"select": {"name": sel(d.get("role_tier", ""),    opt["job"]["Role Tier"])}},
-        "Fit Level":       {"select": {"name": sel(d.get("fit_level", ""),    opt["job"]["Fit Level"])}},
         "Apply Priority":  {"number": None},
         "Salary Min":      {"number": d.get("salary_min") or None},
         "Salary Max":      {"number": d.get("salary_max") or None},
-        "Apply Status":    {"select": {"name": sel(d.get("apply_status", ""), opt["job"]["Apply Status"])}},
         "Work Location":   {"rich_text": [{"text": {"content": d.get("work_location", "")}}]},
         "Key Tech Stack":  {"rich_text": [{"text": {"content": d.get("key_tech_stack", "")}}]},
         "Gaps to Address": {"rich_text": [{"text": {"content": d.get("gaps", "")}}]},
-        "Notes":           {"rich_text": [{"text": {"content": d.get("notes", "")}}]}
+        "Notes":           {"rich_text": [{"text": {"content": d.get("notes", "")}}]},
+        "Date Applied":    {"date": {"start": time.strftime("%Y-%m-%d")}},
     }
+
+    # select fields — skip ถ้าว่าง
+    for field, key in [
+        ("Role Tier",    "role_tier"),
+        ("Fit Level",    "fit_level"),
+        ("Apply Status", "apply_status"),
+    ]:
+        v = sel(d.get(key, ""), opt["job"][field])
+        if v:
+            props[field] = {"select": {"name": v}}
+
+    # URL fields — skip ถ้าว่าง
     if d.get("linkedin_url"):
         props["LinkedIn URL"] = {"url": d["linkedin_url"]}
+    if d.get("job_url"):
+        props["Job URL"]   = {"url": d["job_url"]}
+    if d.get("apply_url"):
+        props["Apply URL"] = {"url": d["apply_url"]}
 
     children = []
     if d.get("analysis"):
@@ -282,7 +297,6 @@ except Exception as e:
     st.error(f"❌ โหลด Notion options ไม่ได้: {e}")
     st.stop()
 
-# สร้างฟังก์ชัน Submit เพื่อให้เรียกใช้ได้ทั้งจากการวางโค้ดและการกรอกฟอร์ม
 def submit_to_notion(job_data, company_data):
     if not job_data.get("job_title", "").strip():
         st.error("กรุณาตรวจสอบว่ามี Job Title ค่ะ")
@@ -299,7 +313,6 @@ def submit_to_notion(job_data, company_data):
         company_name = company_data["company_name"]
         job_title = job_data["job_title"]
 
-        # 1. search / create company
         log(f"🔍 ค้นหา: {company_name}")
         company_id, found = search_company(company_name)
 
@@ -313,7 +326,6 @@ def submit_to_notion(job_data, company_data):
                 return
             log(f"✅ สร้างบริษัท {company_name} สำเร็จ")
 
-        # 2. create job
         job_data["company_name"] = company_name
         ok, err = create_job(job_data, company_id, opt)
         if not ok:
@@ -321,7 +333,6 @@ def submit_to_notion(job_data, company_data):
             return
         log(f"✅ เพิ่ม job: {job_title} @ {company_name}")
 
-        # 3. rerank
         log("\n📊 Reranking jobs...")
         rerank_all_jobs(opt, log)
         log("\n🎉 เสร็จแล้ว!")
@@ -331,10 +342,10 @@ def submit_to_notion(job_data, company_data):
         st.code("\n".join(log_lines))
 
 
-# ── Tabs Navigation ──────────────────────────────────────
+# ── Tabs ─────────────────────────────────────────────────
 tab1, tab2, tab3 = st.tabs(["📝 Paste Python Dict (Fast)", "✍️ Manual Form", "🤖 Batch Analyze"])
 
-# --- TAB 1: สำหรับวางโค้ด ---
+# --- TAB 1 ---
 with tab1:
     st.markdown("วางโค้ด `job_data` และ `company_data` ลงในช่องด้านล่างแล้วกด Submit ได้เลยค่ะ")
     raw_code = st.text_area(
@@ -348,88 +359,83 @@ with tab1:
         if not raw_code.strip():
             st.error("กรุณาวางโค้ดก่อนค่ะ")
             st.stop()
-
         local_vars = {}
         try:
-            # รัน string ให้กลายเป็นตัวแปร Python
             exec(raw_code, {}, local_vars)
-            
             j_data = local_vars.get("job_data")
             c_data = local_vars.get("company_data")
-
             if not isinstance(j_data, dict) or not isinstance(c_data, dict):
                 st.error("❌ โค้ดไม่ถูกต้อง: ต้องมีตัวแปร `job_data` และ `company_data` ที่เป็นรูปแบบ Dictionary ค่ะ")
                 st.stop()
-
             submit_to_notion(j_data, c_data)
-            
         except Exception as e:
             st.error(f"❌ เกิดข้อผิดพลาดในการอ่านโค้ด: {e}")
 
 
-# --- TAB 2: สำหรับกรอกฟอร์มแบบเดิม ---
+# --- TAB 2 ---
 with tab2:
     st.subheader("📋 Job Info")
     col1, col2 = st.columns(2)
     with col1:
-        job_title = st.text_input("Job Title *", placeholder="Data Analyst")
-        role_tier = st.selectbox("Role Tier", [""] + opt["job"]["Role Tier"])
-        fit_level = st.selectbox("Fit Level", [""] + opt["job"]["Fit Level"])
+        job_title    = st.text_input("Job Title *", placeholder="Data Analyst")
+        role_tier    = st.selectbox("Role Tier", [""] + opt["job"]["Role Tier"])
+        fit_level    = st.selectbox("Fit Level", [""] + opt["job"]["Fit Level"])
         apply_status = st.selectbox("Apply Status", [""] + opt["job"]["Apply Status"])
-
     with col2:
         work_location = st.text_input("Work Location", placeholder="Bangkok, On-site")
-        salary_min = st.number_input("Salary Min (฿)", min_value=0, step=1000, value=0)
-        salary_max = st.number_input("Salary Max (฿)", min_value=0, step=1000, value=0)
-        linkedin_url = st.text_input("LinkedIn URL", placeholder="https://linkedin.com/...")
+        salary_min    = st.number_input("Salary Min (฿)", min_value=0, step=1000, value=0)
+        salary_max    = st.number_input("Salary Max (฿)", min_value=0, step=1000, value=0)
+        linkedin_url  = st.text_input("LinkedIn URL", placeholder="https://linkedin.com/...")
 
+    job_url       = st.text_input("Job URL", placeholder="https://th.jobsdb.com/job/...")
+    apply_url     = st.text_input("Apply URL (ลิงค์สมัครโดยตรง)", placeholder="https://...")
     key_tech_stack = st.text_input("Key Tech Stack", placeholder="SQL, Python, Tableau")
-    gaps = st.text_area("Gaps to Address", placeholder="สิ่งที่ขาด / ต้องเตรียม", height=80)
-    job_notes = st.text_area("Job Notes", placeholder="หมายเหตุเพิ่มเติม", height=80)
-    analysis = st.text_area("AI Analysis", placeholder="วาง AI analysis ได้เลยค่ะ", height=120)
+    gaps          = st.text_area("Gaps to Address", placeholder="สิ่งที่ขาด / ต้องเตรียม", height=80)
+    job_notes     = st.text_area("Job Notes", placeholder="หมายเหตุเพิ่มเติม", height=80)
+    analysis      = st.text_area("AI Analysis", placeholder="วาง AI analysis ได้เลยค่ะ", height=120)
 
     st.markdown("---")
     st.subheader("🏢 Company Info")
-
     col3, col4 = st.columns(2)
     with col3:
         company_name = st.text_input("Company Name *", placeholder="Shopee")
         company_size = st.text_input("Company Size", placeholder="10000+ employees")
         company_tier = st.selectbox("Company Tier", [""] + opt["company"]["Company Tier"])
-        industry = st.selectbox("Industry", [""] + opt["company"]["Industry"])
-
+        industry     = st.selectbox("Industry", [""] + opt["company"]["Industry"])
     with col4:
-        location = st.text_input("Location", placeholder="Bangkok, Thailand")
+        location   = st.text_input("Location", placeholder="Bangkok, Thailand")
         wfh_policy = st.selectbox("WFH Policy", [""] + opt["company"]["WFH Policy"])
-        website = st.text_input("Website", placeholder="https://careers.shopee.co.th")
+        website    = st.text_input("Website", placeholder="https://careers.shopee.co.th")
 
     company_notes = st.text_area("Company Notes", placeholder="Glassdoor score, culture notes ฯลฯ", height=80)
 
     st.markdown("---")
     if st.button("🚀 Add to Notion + Rerank", key="btn_manual"):
         j_data = {
-            "job_title": job_title,
-            "role_tier": role_tier,
-            "fit_level": fit_level,
-            "apply_status": apply_status,
-            "work_location": work_location,
-            "salary_min": salary_min if salary_min > 0 else None,
-            "salary_max": salary_max if salary_max > 0 else None,
-            "linkedin_url": linkedin_url,
+            "job_title":      job_title,
+            "role_tier":      role_tier,
+            "fit_level":      fit_level,
+            "apply_status":   apply_status,
+            "work_location":  work_location,
+            "salary_min":     salary_min if salary_min > 0 else None,
+            "salary_max":     salary_max if salary_max > 0 else None,
+            "linkedin_url":   linkedin_url,
+            "job_url":        job_url,
+            "apply_url":      apply_url,
             "key_tech_stack": key_tech_stack,
-            "gaps": gaps,
-            "notes": job_notes,
-            "analysis": analysis,
+            "gaps":           gaps,
+            "notes":          job_notes,
+            "analysis":       analysis,
         }
         c_data = {
             "company_name": company_name,
             "company_size": company_size,
             "company_tier": company_tier,
-            "industry": industry,
-            "location": location,
-            "wfh_policy": wfh_policy,
-            "website": website,
-            "notes": company_notes,
+            "industry":     industry,
+            "location":     location,
+            "wfh_policy":   wfh_policy,
+            "website":      website,
+            "notes":        company_notes,
         }
         submit_to_notion(j_data, c_data)
 
@@ -485,6 +491,7 @@ JD:
   "resume_version": "VERSION A/B/RHENUS/THINKNET/ACCENTURE",
   "resume_reason": "เหตุผลสั้นๆ",
   "apply_decision": "APPLY/WATCHLIST/PASS",
+  "apply_url": "ลิงค์สมัครงานโดยตรงจาก JD ถ้าไม่มีให้ใส่ค่าว่าง",
   "company_size": "startup/sme/enterprise",
   "company_tier": "Level1/2/3 - เหตุผล",
   "industry": "อุตสาหกรรม",
@@ -548,57 +555,63 @@ def fetch_jd(url):
     return "[ไม่สามารถดึง content ได้]"
 
 
-def analyze_with_gemini(jd_text, retries=3):
+def analyze_with_llm(jd_text, retries=3):
+    prompt = ANALYSIS_PROMPT.format(profile=CANDIDATE_PROFILE, jd_text=jd_text[:5000])
+
+    # ── ลอง OpenRouter ก่อน ──────────────────────────────
+    if OPENROUTER_API_KEY:
+        for attempt in range(retries):
+            resp = None
+            try:
+                resp = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": "google/gemini-2.0-flash-exp:free",
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 8192,
+                        "temperature": 0.3,
+                    },
+                    timeout=90
+                )
+                resp.raise_for_status()
+                raw = resp.json()["choices"][0]["message"]["content"]
+                raw = re.sub(r"^```json\s*", "", raw.strip())
+                raw = re.sub(r"```\s*$", "", raw.strip())
+                return _parse_llm_json(raw)
+            except requests.exceptions.HTTPError as e:
+                if resp is not None and resp.status_code == 429 and attempt < retries - 1:
+                    time.sleep((attempt + 1) * 30)
+                    continue
+                if resp is not None and resp.status_code == 503 and attempt < retries - 1:
+                    time.sleep((attempt + 1) * 10)
+                    continue
+                return {"error": f"OpenRouter error: {e}"}
+            except Exception as e:
+                return {"error": f"OpenRouter error: {e}"}
+
+    # ── fallback: Gemini direct ───────────────────────────
     if not GEMINI_API_KEY:
-        return {"error": "ไม่มี GEMINI_API_KEY ใน secrets"}
+        return {"error": "ไม่มี OPENROUTER_API_KEY หรือ GEMINI_API_KEY ใน secrets"}
+
     url = ("https://generativelanguage.googleapis.com/v1beta/models/"
            "gemini-2.0-flash-lite:generateContent?key=" + GEMINI_API_KEY)
-    prompt = ANALYSIS_PROMPT.format(profile=CANDIDATE_PROFILE, jd_text=jd_text[:5000])
 
     for attempt in range(retries):
         resp = None
         try:
             resp = requests.post(url, json={
                 "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "temperature": 0.3,
-                    "maxOutputTokens": 8192
-                }
+                "generationConfig": {"temperature": 0.3, "maxOutputTokens": 8192}
             }, timeout=90)
             resp.raise_for_status()
             raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
             raw = re.sub(r"^```json\s*", "", raw.strip())
             raw = re.sub(r"```\s*$", "", raw.strip())
-
-            try:
-                return json.loads(raw)
-            except json.JSONDecodeError:
-                last_brace = raw.rfind("}")
-                if last_brace != -1:
-                    repaired = raw[:last_brace + 1]
-                    try:
-                        return json.loads(repaired)
-                    except json.JSONDecodeError:
-                        pass
-                def extract(field, default=""):
-                    m = re.search(rf'"{field}"\s*:\s*"([^"]*)"', raw)
-                    return m.group(1) if m else default
-                return {
-                    "job_title":      extract("job_title", "Unknown"),
-                    "company_name":   extract("company_name", "Unknown"),
-                    "fit_level":      extract("fit_level", "medium"),
-                    "apply_decision": extract("apply_decision", "WATCHLIST"),
-                    "role_tier":      extract("role_tier", ""),
-                    "work_location":  extract("work_location", ""),
-                    "key_tech_stack": extract("key_tech_stack", ""),
-                    "gaps":           extract("gaps", ""),
-                    "notes":          extract("notes", ""),
-                    "wfh_policy":     extract("wfh_policy", "Unknown"),
-                    "company_size":   extract("company_size", ""),
-                    "company_tier":   extract("company_tier", ""),
-                    "industry":       extract("industry", ""),
-                    "error": "JSON truncated — partial data recovered"
-                }
+            return _parse_llm_json(raw)
 
         except requests.exceptions.HTTPError as e:
             error_body = {}
@@ -610,36 +623,60 @@ def analyze_with_gemini(jd_text, retries=3):
             error_status = error_body.get("error", {}).get("status", "")
 
             if resp is not None and resp.status_code == 429:
-                # quota หมดวัน — ไม่มีประโยชน์ retry
                 if error_status == "RESOURCE_EXHAUSTED" or "quota" in error_msg.lower():
-                    # ลองดึง retry time จาก message ก่อน
                     retry_match = re.search(r"retry in ([\d.]+)s", error_msg)
                     if retry_match and attempt < retries - 1:
-                        wait = float(retry_match.group(1)) + 5  # บวก buffer 5s
-                        time.sleep(wait)
+                        time.sleep(float(retry_match.group(1)) + 5)
                         continue
-                    # ถ้าไม่มี retry time → quota หมดวันจริง
-                    return {"error": f"Gemini quota หมดแล้ว — รอถึงพรุ่งนี้หรือเพิ่ม billing"}
-                # rate limit ชั่วคราว → retry
+                    return {"error": "Gemini quota หมดแล้ว — รอถึงพรุ่งนี้หรือเพิ่ม billing"}
                 if attempt < retries - 1:
-                    wait = (attempt + 1) * 30  # 30s → 60s → 90s
-                    time.sleep(wait)
+                    time.sleep((attempt + 1) * 30)
                     continue
-
             elif resp is not None and resp.status_code == 503 and attempt < retries - 1:
-                wait = (attempt + 1) * 10  # 10s → 20s → 30s
-                time.sleep(wait)
+                time.sleep((attempt + 1) * 10)
                 continue
-
             return {"error": f"{str(e)} | {error_msg}"}
 
         except Exception as e:
             return {"error": str(e)}
 
-    return {"error": "Gemini retry หมดแล้ว"}
+    return {"error": "LLM retry หมดแล้ว"}
+
+
+def _parse_llm_json(raw):
+    """Parse JSON จาก LLM — พยายาม repair ถ้าถูกตัด"""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        last_brace = raw.rfind("}")
+        if last_brace != -1:
+            try:
+                return json.loads(raw[:last_brace + 1])
+            except json.JSONDecodeError:
+                pass
+        def extract(field, default=""):
+            m = re.search(rf'"{field}"\s*:\s*"([^"]*)"', raw)
+            return m.group(1) if m else default
+        return {
+            "job_title":      extract("job_title", "Unknown"),
+            "company_name":   extract("company_name", "Unknown"),
+            "fit_level":      extract("fit_level", "medium"),
+            "apply_decision": extract("apply_decision", "WATCHLIST"),
+            "role_tier":      extract("role_tier", ""),
+            "work_location":  extract("work_location", ""),
+            "key_tech_stack": extract("key_tech_stack", ""),
+            "gaps":           extract("gaps", ""),
+            "notes":          extract("notes", ""),
+            "wfh_policy":     extract("wfh_policy", "Unknown"),
+            "company_size":   extract("company_size", ""),
+            "company_tier":   extract("company_tier", ""),
+            "industry":       extract("industry", ""),
+            "apply_url":      extract("apply_url", ""),
+            "error": "JSON truncated — partial data recovered"
+        }
+
 
 def analysis_to_notion_dicts(a, job_url):
-    """แปลง Gemini output → job_data + company_data ที่ส่งให้ submit_to_notion ได้เลย"""
     ip = a.get("interview_prep", {})
     ag = a.get("application_guide", {})
     parts = [a.get("narrative_analysis", "")]
@@ -662,6 +699,8 @@ def analysis_to_notion_dicts(a, job_url):
     if a.get("resume_version"):
         parts.append(f"\n--- RESUME ---\nใช้: {a['resume_version']}\nเหตุผล: {a.get('resume_reason','')}")
 
+    apply_url = a.get("apply_url", "").strip() or job_url
+
     job_data = {
         "job_title":      a.get("job_title", "Unknown"),
         "role_tier":      a.get("role_tier", ""),
@@ -670,6 +709,8 @@ def analysis_to_notion_dicts(a, job_url):
         "work_location":  a.get("work_location", ""),
         "salary_min":     a.get("salary_min") or None,
         "salary_max":     a.get("salary_max") or None,
+        "job_url":        job_url,
+        "apply_url":      apply_url,
         "linkedin_url":   job_url if "linkedin.com" in job_url else "",
         "key_tech_stack": a.get("key_tech_stack", ""),
         "gaps":           a.get("gaps", ""),
@@ -690,19 +731,18 @@ def analysis_to_notion_dicts(a, job_url):
 
 
 with tab3:
-    st.markdown("วิเคราะห์ job จาก URL เดี่ยว หรืออัปโหลด CSV รายการ URL → Gemini → Notion ค่ะ")
+    st.markdown("วิเคราะห์ job จาก URL เดี่ยว หรืออัปโหลด CSV รายการ URL → LLM → Notion ค่ะ")
 
-    if not GEMINI_API_KEY:
-        st.warning("⚠️ ยังไม่มี `GEMINI_API_KEY` ใน Streamlit Secrets — ไปเพิ่มที่ Settings → Secrets ก่อนนะคะ")
+    if not OPENROUTER_API_KEY and not GEMINI_API_KEY:
+        st.warning("⚠️ ยังไม่มี `OPENROUTER_API_KEY` หรือ `GEMINI_API_KEY` ใน Streamlit Secrets ค่ะ")
 
     delay       = st.slider("หน่วงเวลาระหว่าง request (วินาที)", 5, 30, 12,
-                            help="Gemini free tier limit ~10 req/min — แนะนำ 12+ วินาที")
+                            help="แนะนำ 12+ วินาที เพื่อหลีกเลี่ยง rate limit")
     push_notion = st.checkbox("Push เข้า Notion อัตโนมัติ", value=True)
 
-    # ── input mode ──────────────────────────────────────────
     mode = st.radio("วิธีใส่ job", ["🔗 วาง URL เดี่ยว", "📂 อัปโหลด CSV"], horizontal=True)
 
-    jobs = []  # list of {"url": ..., "name": ...}
+    jobs = []
 
     if mode == "🔗 วาง URL เดี่ยว":
         raw_urls = st.text_area(
@@ -723,7 +763,7 @@ with tab3:
             if jobs:
                 st.info(f"พบ **{len(jobs)}** URL")
 
-    else:  # CSV mode
+    else:
         uploaded = st.file_uploader("อัปโหลด Job_Listings.csv", type="csv")
         if uploaded:
             import csv, io
@@ -743,8 +783,11 @@ with tab3:
             if jobs:
                 st.info(f"พบ **{len(jobs)}** unique jobs ({dupes} duplicates ถูกตัดออก)")
 
-    # ── run button ───────────────────────────────────────────
-    if jobs and st.button("🚀 Start Batch Analyze", key="btn_batch"):
+    if st.button("🚀 Start Batch Analyze", key="btn_batch"):
+        if not jobs:
+            st.warning("⚠️ กรุณาใส่ URL หรืออัปโหลด CSV ก่อนนะคะ")
+            st.stop()
+
         stats    = {"ok": 0, "err": 0, "notion_ok": 0, "notion_err": 0}
         results  = []
         progress = st.progress(0, text="เริ่มต้น...")
@@ -765,8 +808,8 @@ with tab3:
             jd = fetch_jd(url)
             add_log(f"  📄 {jd[:80].replace(chr(10),' ')}...")
 
-            add_log(f"  🤖 Analyzing with Gemini...")
-            analysis = analyze_with_gemini(jd)
+            add_log(f"  🤖 Analyzing with LLM...")
+            analysis = analyze_with_llm(jd)
 
             if "error" in analysis and "job_title" not in analysis:
                 add_log(f"  ❌ {analysis['error']}")
@@ -805,7 +848,6 @@ with tab3:
             if i < len(jobs) - 1:
                 time.sleep(delay)
 
-        # rerank ตอนจบ
         if push_notion and stats["notion_ok"] > 0:
             add_log("\n📊 Reranking all jobs...")
             try:
