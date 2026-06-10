@@ -612,7 +612,14 @@ def analyze_with_gemini(jd_text, retries=3):
             if resp is not None and resp.status_code == 429:
                 # quota หมดวัน — ไม่มีประโยชน์ retry
                 if error_status == "RESOURCE_EXHAUSTED" or "quota" in error_msg.lower():
-                    return {"error": f"Gemini quota หมดแล้ว — รอถึงพรุ่งนี้หรือเพิ่ม billing: {error_msg}"}
+                    # ลองดึง retry time จาก message ก่อน
+                    retry_match = re.search(r"retry in ([\d.]+)s", error_msg)
+                    if retry_match and attempt < retries - 1:
+                        wait = float(retry_match.group(1)) + 5  # บวก buffer 5s
+                        time.sleep(wait)
+                        continue
+                    # ถ้าไม่มี retry time → quota หมดวันจริง
+                    return {"error": f"Gemini quota หมดแล้ว — รอถึงพรุ่งนี้หรือเพิ่ม billing"}
                 # rate limit ชั่วคราว → retry
                 if attempt < retries - 1:
                     wait = (attempt + 1) * 30  # 30s → 60s → 90s
