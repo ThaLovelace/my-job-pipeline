@@ -268,8 +268,14 @@ def rerank_all_jobs(opt, log_fn):
         return
 
     def job_score(job):
-        fit = job["properties"].get("Fit Level", {}).get("select") or {}
-        return -FIT_SCORE.get(fit.get("name", "").lower(), 0)
+        props = job["properties"]
+        fit   = props.get("Fit Level", {}).get("select") or {}
+        fit_s = FIT_SCORE.get(fit.get("name", "").lower(), 0)
+        # ดึง ai_depth และ ownership จาก Notes (ถ้ามี) — fallback 0
+        # score รวม: fit*3 (น้ำหนักหลัก) ให้ APPLY > WATCHLIST > PASS
+        apply_status = props.get("Apply Status", {}).get("select") or {}
+        apply_bonus = {"apply": 2, "to apply": 1}.get(apply_status.get("name", "").lower(), 0)
+        return -(fit_s * 3 + apply_bonus)
 
     jobs_sorted = sorted(jobs, key=job_score)
     for rank, job in enumerate(jobs_sorted, start=1):
@@ -770,8 +776,8 @@ Reply ONLY with valid JSON. No markdown. No backticks. No extra text.
 
 Rules:
 - job_title: exact position name (e.g. "Data Engineer", "AI Developer"). NEVER leave empty.
-- company_name: hiring company name. If not stated anywhere, use "Not specified".
-- Look for company name in: page title, "About us", "About the company", copyright footer, or any brand name mentioned.
+- company_name: hiring company name. Search EVERYWHERE in the text: page title, "About us / เกี่ยวกับเรา", copyright footer, email domain, brand logos described, or any organization name. If truly not found anywhere, use "Not specified" — but try hard first.
+- If the JD mentions applying "at [Company]" or "join [Company]" or "we are [Company]", extract that name.
 - salary_min / salary_max: numbers in THB only, null if not stated.
 - wfh_policy: one of "WFH Available" / "Hybrid" / "On-site" / "Unknown"
 
@@ -890,8 +896,10 @@ def analyze_with_llm(jd_text, retries=2):
         raw1 = re.sub(r"```\s*$", "", raw1.strip())
         job_facts = json.loads(raw1)
     except json.JSONDecodeError:
-        # ถ้า parse ไม่ได้ ใช้ JD raw แทน
-        job_facts = {"raw_jd": jd_text[:2000]}
+        # ถ้า parse ไม่ได้ ลอง repair ก่อน แล้วค่อย fallback
+        job_facts = _parse_llm_json(raw1) if 'raw1' in dir() else {}
+        if not job_facts.get("company_name"):
+            job_facts["raw_jd"] = jd_text[:2000]
     except RuntimeError as e:
         return {"error": str(e), "job_title": "Unknown", "company_name": "Unknown"}
 
@@ -926,6 +934,24 @@ def analyze_with_llm(jd_text, retries=2):
     ]
     for key, default in CORE_KEYS:
         result[key] = job_facts.get(key) or fit_data.get(key) or default
+
+    # ── Validate company_name — ถ้ายัง "Not specified" / ว่าง ให้ retry extract จาก JD โดยตรง
+    cn = result.get("company_name", "")
+    if not cn or cn.lower() in ("not specified", "unknown", ""):
+        # พยายามดึงชื่อบริษัทจาก JD ด้วย regex เป็น last resort
+        # หา pattern: "Company:", "บริษัท:", brand name ใน title line แรก
+        company_patterns = [
+            r"(?:company|บริษัท|employer|องค์กร)\s*[:\-]\s*(.+)",
+            r"(?:about|เกี่ยวกับ)\s+([A-Z][A-Za-z0-9\s&\.]+?)(?:\n|จำกัด|Co\.|Ltd\.)",
+            r"©\s*\d{4}\s+([A-Za-z][A-Za-z0-9\s&\.]+?)(?:\s|$)",
+        ]
+        for pat in company_patterns:
+            m = re.search(pat, jd_text[:3000], re.IGNORECASE | re.MULTILINE)
+            if m:
+                candidate = m.group(1).strip()[:80]
+                if len(candidate) > 2:
+                    result["company_name"] = candidate
+                    break
 
     return result
 
@@ -991,7 +1017,11 @@ def analysis_to_notion_dicts(a, job_url):
         "job_title":      a.get("job_title", "Unknown"),
         "role_tier":      a.get("role_tier", ""),
         "fit_level":      a.get("fit_level", "medium"),
-        "apply_status":   "To Apply",
+        "apply_status":   {
+            "APPLY":     "To Apply",
+            "WATCHLIST": "On Hold",
+            "PASS":      "❌ Pass ไม่เอา",
+        }.get(a.get("apply_decision", "").upper(), "No Apply Status"),
         "work_location":  a.get("work_location", ""),
         "salary_min":     a.get("salary_min") or None,
         "salary_max":     a.get("salary_max") or None,
@@ -1024,7 +1054,7 @@ with tab3:
                             help="แนะนำ 12+ วินาที เพื่อหลีกเลี่ยง rate limit")
     push_notion = st.checkbox("Push เข้า Notion อัตโนมัติ", value=True)
 
-    mode = st.radio("วิธีใส่ job", ["🔗 วาง URL เดี่ยว", "📂 อัปโหลด CSV"], horizontal=True)
+    mode = st.radio("วิธีใส่ job", ["🔗 วาง URL เดี่ยว", "📝 วาง JD โดยตรง", "📂 อัปโหลด CSV"], horizontal=True)
 
     jobs = []
 
@@ -1046,6 +1076,22 @@ with tab3:
                     jobs.append({"url": url, "name": url[:60]})
             if jobs:
                 st.info(f"พบ **{len(jobs)}** URL")
+
+    elif mode == "📝 วาง JD โดยตรง":
+        st.markdown("วาง JD ที่ copy มาจาก Facebook, LinkedIn, หรือเว็บอื่นที่ fetch ไม่ได้ค่ะ")
+        manual_url = st.text_input(
+            "URL ต้นทาง (ไม่บังคับ — ใส่เพื่อเก็บ link ใน Notion)",
+            placeholder="https://www.facebook.com/share/p/..."
+        )
+        manual_jd = st.text_area(
+            "วาง JD ที่นี่",
+            height=300,
+            placeholder="ชื่อตำแหน่ง: ...\nบริษัท: ...\nหน้าที่: ..."
+        )
+        if manual_jd.strip():
+            ref_url = manual_url.strip() or f"manual://jd-{hash(manual_jd[:100]) % 100000}"
+            jobs.append({"url": ref_url, "name": ref_url[:60], "jd_text": manual_jd.strip()})
+            st.info("พบ **1** JD พร้อมวิเคราะห์")
 
     else:
         uploaded = st.file_uploader("อัปโหลด Job_Listings.csv", type="csv")
@@ -1088,17 +1134,22 @@ with tab3:
             progress.progress(i / len(jobs), text=f"[{i+1}/{len(jobs)}] {name[:40]}...")
 
             add_log(f"\n[{i+1}/{len(jobs)}] {name[:55]}")
-            add_log(f"  🌐 Fetching JD...")
-            jd, fetch_err = fetch_jd(url)
-            if fetch_err:
-                add_log(f"  ❌ Fetch failed: {fetch_err}")
-                add_log(f"  ⏭️ ข้ามไปก่อนเลยค่ะ — ไม่ส่งเข้า LLM")
-                stats["err"] += 1
-                results.append({"url": url, "name": name, "status": "error", "error": fetch_err})
-                if i < len(jobs) - 1:
-                    time.sleep(delay)
-                continue
-            add_log(f"  📄 {jd[:80].replace(chr(10),' ')}...")
+            # ถ้า job มี jd_text แนบมาแล้ว (กรณีวาง JD โดยตรง) ข้าม fetch
+            if job.get("jd_text"):
+                jd = job["jd_text"]
+                add_log(f"  📋 ใช้ JD ที่วางมาโดยตรง ({len(jd)} chars)")
+            else:
+                add_log(f"  🌐 Fetching JD...")
+                jd, fetch_err = fetch_jd(url)
+                if fetch_err:
+                    add_log(f"  ❌ Fetch failed: {fetch_err}")
+                    add_log(f"  ⏭️ ข้ามไปก่อนเลยค่ะ — ไม่ส่งเข้า LLM")
+                    stats["err"] += 1
+                    results.append({"url": url, "name": name, "status": "error", "error": fetch_err})
+                    if i < len(jobs) - 1:
+                        time.sleep(delay)
+                    continue
+                add_log(f"  📄 {jd[:80].replace(chr(10),' ')}...")
 
             add_log(f"  🤖 Analyzing with LLM...")
             analysis = analyze_with_llm(jd)
@@ -1119,9 +1170,10 @@ with tab3:
                         j_data, c_data = analysis_to_notion_dicts(analysis, url)
                         if not j_data.get("job_title", "").strip():
                             raise ValueError("no job title")
-                        if not c_data.get("company_name", "").strip():
-                            raise ValueError("no company name")
-                        company_id, found = search_company(c_data["company_name"])
+                        cn = c_data.get("company_name", "").strip()
+                        if not cn or cn.lower() in ("not specified", "unknown", ""):
+                            raise ValueError(f"company name ว่างหรือไม่ชัดเจน ('{cn}') — กรุณาระบุชื่อบริษัทเองค่ะ")
+                        company_id, found = search_company(cn)
                         if not found or not company_id:
                             company_id, err = create_company(c_data, opt)
                             if err:
@@ -1150,6 +1202,49 @@ with tab3:
 
         progress.progress(1.0, text="เสร็จแล้ว! ✨")
         st.success(f"เสร็จแล้ว! ✅ {stats['ok']} analyzed | 📤 {stats['notion_ok']} pushed | ❌ {stats['err']} errors")
+
+        # ── แสดง URL ที่ fetch ไม่ได้ พร้อม manual input ──────
+        failed_jobs = [r for r in results if r.get("status") == "error"]
+        if failed_jobs:
+            st.markdown("---")
+            st.warning(f"⚠️ **{len(failed_jobs)} URL ที่ fetch ไม่ได้** — วาง JD เองได้ที่นี่ค่ะ")
+            for fr in failed_jobs:
+                with st.expander(f"🔗 {fr['url'][:70]}  •  {fr.get('error','')}"):
+                    manual_text = st.text_area(
+                        "วาง JD ที่นี่",
+                        key=f"manual_{hash(fr['url']) % 999999}",
+                        height=200,
+                        placeholder="Copy JD มาวางได้เลยค่ะ..."
+                    )
+                    if st.button("วิเคราะห์ + Push Notion", key=f"btn_manual_{hash(fr['url']) % 999999}"):
+                        if manual_text.strip():
+                            with st.spinner("วิเคราะห์อยู่..."):
+                                a2 = analyze_with_llm(manual_text.strip())
+                            if "error" not in a2 or a2.get("job_title") != "Unknown":
+                                st.success(f"✅ {a2.get('job_title','?')} @ {a2.get('company_name','?')}")
+                                if push_notion:
+                                    try:
+                                        j2, c2 = analysis_to_notion_dicts(a2, fr["url"])
+                                        if not j2.get("job_title","").strip():
+                                            raise ValueError("no job title")
+                                        cn2 = c2.get("company_name", "").strip()
+                                        if not cn2 or cn2.lower() in ("not specified", "unknown", ""):
+                                            raise ValueError(f"company name ว่าง ('{cn2}') — กรุณาระบุชื่อบริษัทเองค่ะ")
+                                        cid, found2 = search_company(cn2)
+                                        if not found2 or not cid:
+                                            cid, cerr = create_company(c2, opt)
+                                            if cerr: raise ValueError(cerr)
+                                        ok2, jerr = create_job(j2, cid, opt)
+                                        if ok2:
+                                            st.success("📤 Push Notion สำเร็จค่ะ!")
+                                        else:
+                                            st.error(f"Notion error: {jerr}")
+                                    except Exception as ex:
+                                        st.error(f"❌ {ex}")
+                            else:
+                                st.error(f"LLM error: {a2.get('error')}")
+                        else:
+                            st.warning("กรุณาวาง JD ก่อนค่ะ")
 
         all_a = [r["analysis"] for r in results if r.get("status") == "ok"]
         if all_a:
