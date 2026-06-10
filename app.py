@@ -951,17 +951,29 @@ def analyze_with_llm(jd_text, retries=2):
     # ── Merge: job_facts + fit_data = result เดิม ──────────
     result = {**job_facts, **fit_data}
 
-    # normalize keys ให้ตรงกับ analysis_to_notion_dicts ที่ใช้อยู่
-    result.setdefault("job_title",    job_facts.get("job_title", "Unknown"))
-    result.setdefault("company_name", job_facts.get("company_name", "Unknown"))
-    result.setdefault("work_location",job_facts.get("work_location", ""))
-    result.setdefault("wfh_policy",   job_facts.get("wfh_policy", "Unknown"))
-    result.setdefault("salary_min",   job_facts.get("salary_min"))
-    result.setdefault("salary_max",   job_facts.get("salary_max"))
-    result.setdefault("key_tech_stack", job_facts.get("key_tech_stack", ""))
-    result.setdefault("industry",     job_facts.get("industry", ""))
-    result.setdefault("website",      job_facts.get("website", ""))
-    result.setdefault("apply_url",    job_facts.get("apply_url", ""))
+    # ── Critical fields: ใช้ job_facts เป็น source of truth เสมอ ──
+    # fit_data อาจส่ง "" มาทับ ต้องป้องกัน
+    def _pick(key, fallback=""):
+        """Return first non-empty value: fit_data → job_facts → fallback"""
+        v = (fit_data.get(key) or "").strip()
+        if v:
+            return v
+        v = (job_facts.get(key) or "").strip()
+        if v:
+            return v
+        return fallback
+
+    result["job_title"]     = _pick("job_title") or _extract_title_from_jd(jd_text) or "Unknown Position"
+    result["company_name"]  = _pick("company_name") or "Unknown Company"
+    result["work_location"] = _pick("work_location")
+    result["wfh_policy"]    = _pick("wfh_policy", "Unknown")
+    result["key_tech_stack"]= _pick("key_tech_stack")
+    result["industry"]      = _pick("industry")
+    result["website"]       = _pick("website")
+    result["apply_url"]     = _pick("apply_url")
+    # numeric fields — keep None if missing
+    result["salary_min"]    = result.get("salary_min") or job_facts.get("salary_min")
+    result["salary_max"]    = result.get("salary_max") or job_facts.get("salary_max")
 
     return result
 
@@ -999,7 +1011,18 @@ def _parse_llm_json(raw):
         }
 
 
-def analysis_to_notion_dicts(a, job_url):
+def analysis_to_notion_dicts(a, job_url, jd_text=""):
+    # ── Fallbacks สำหรับ critical fields ─────────────────
+    job_title = (a.get("job_title") or "").strip()
+    if not job_title and jd_text:
+        job_title = _extract_title_from_jd(jd_text)
+    if not job_title:
+        job_title = "Unknown Position"
+
+    company_name = (a.get("company_name") or "").strip()
+    if not company_name:
+        company_name = "Unknown Company"
+
     ip = a.get("interview_prep", {})
     ag = a.get("application_guide", {})
     parts = [a.get("narrative_analysis", "")]
@@ -1024,7 +1047,7 @@ def analysis_to_notion_dicts(a, job_url):
 
     # ปรับเหลือแค่ job_url หลักชิ้นเดียว
     job_data = {
-        "job_title":      a.get("job_title", "Unknown"),
+        "job_title":      job_title,
         "role_tier":      a.get("role_tier", ""),
         "fit_level":      a.get("fit_level", "medium"),
         "apply_status":   "To Apply",
@@ -1038,7 +1061,7 @@ def analysis_to_notion_dicts(a, job_url):
         "analysis":       "\n\n".join(parts),
     }
     company_data = {
-        "company_name": a.get("company_name", "Unknown"),
+        "company_name": company_name,
         "company_size": a.get("company_size", ""),
         "company_tier": a.get("company_tier", ""),
         "industry":     a.get("industry", ""),
@@ -1152,7 +1175,7 @@ with tab3:
                 if push_notion:
                     add_log(f"  📤 Pushing to Notion...")
                     try:
-                        j_data, c_data = analysis_to_notion_dicts(analysis, url)
+                        j_data, c_data = analysis_to_notion_dicts(analysis, url, jd_text=jd)
                         if not j_data.get("job_title", "").strip():
                             raise ValueError("no job title")
                         if not c_data.get("company_name", "").strip():
