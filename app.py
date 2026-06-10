@@ -570,7 +570,7 @@ def analyze_with_llm(jd_text, retries=3):
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": "google/gemini-2.0-flash-exp:free",
+                        "model": "poolside/laguna-m.1:free",
                         "messages": [{"role": "user", "content": prompt}],
                         "max_tokens": 8192,
                         "temperature": 0.3,
