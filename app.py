@@ -438,40 +438,142 @@ with tab2:
 
 # ── TAB 3: Batch Analyze ─────────────────────────────────
 CANDIDATE_PROFILE = """
-WHO I AM — THAPANEE CHAIPRAPHA
+═══════════════════════════════════════════
+WHO I AM — THAPANEE CHAIPRAPHA (ทับทิม)
+═══════════════════════════════════════════
 Fresh grad (May 2026), Thammasat University — Software Engineering (CS)
-งานแรก — เปิดรับกว้าง แต่ prefer AI/Tech roles
+งานแรก — เปิดรับกว้าง แต่ prefer AI/Tech roles ที่ build ของจริง
 
-Hard Skills
+── HARD SKILLS ──────────────────────────
 Proficient: Python, JavaScript, Java, React.js, FastAPI, Node.js, SQL, MongoDB, Git, Figma,
-LLM API (Gemini, OpenAI-compatible), Prompt Engineering, Vision Transformers (ViT-B/16),
-Deep Learning, Grad-CAM (Explainable AI)
+  LLM API (Gemini, OpenAI-compatible), Prompt Engineering,
+  Vision Transformers (ViT-B/16), Deep Learning, Grad-CAM (Explainable AI)
 Familiar: Next.js, TypeScript, Tailwind CSS, Docker, Power BI, Excel VBA
 
-Key Projects
-- dCDT — Solo medical AI screening: 96.14% accuracy | FastAPI + Next.js + ViT-B/16 + Grad-CAM
-- MyGPT — Full-stack LLM web app | React + Node.js + Gemini API + JWT + Vercel
-- Keeppook — Android finance tracker | Java + Gemini API + caching layer
-- Freelance UX/UI: 6 projects, 5-star, Fastwork
+── KEY PROJECTS ─────────────────────────
+- dCDT (Senior Project, Solo) — Medical AI screening app
+    96.14% accuracy | FastAPI + Next.js + ViT-B/16 + Grad-CAM heatmaps
+    → คนทำคนเดียวตั้งแต่ research → model → backend → frontend → deploy
+    → เน้น explainability เพราะ medical staff ต้องตรวจสอบ AI ได้
+- MyGPT — Full-stack LLM web app (Production deployed)
+    React + Node.js + Gemini API + JWT auth + credit system + Vercel
+- Keeppook — Android finance tracker
+    Java + Gemini API + caching layer; designed around real UX pain points
+- Freelance UX/UI — 6 projects, 5-star rating, Fastwork
 
-Salary: 35K–45K THB (floor 30K) | WFH/Hybrid preferred
-งานที่ใช่: build AI ที่คนใช้จริง, ownership สูง, ทีมเล็ก, ไม่ bureaucratic
-Dealbreakers: เงิน <30K, Pure QA, implement ตาม spec อย่างเดียว, บริษัทไม่มั่นคง
+── SALARY & LOGISTICS ───────────────────
+Target: 35K–45K THB | Hard floor: 30K
+WFH preferred; Hybrid OK; On-site ยอมรับได้ถ้างานดีมากพอ
+
+── WHAT I THRIVE IN (Green flags) ───────
+✓ Real users, big problems — งานที่ impact คนจริงๆ ไม่ใช่ internal tool ที่ไม่มีคนใช้
+✓ Design my own solution — ไม่ใช่แค่ implement spec ที่คนอื่นคิดมาให้
+✓ High ownership — รับผิดชอบ feature / product ตั้งแต่ต้นจนจบ
+✓ Fast learning culture — ทีมที่ ship เร็ว ไม่ติด process หนัก
+✓ No bureaucracy — ไม่มี layer approval 5 ชั้น, ตัดสินใจได้จริง
+✓ AI ที่เป็น core product — ไม่ใช่แค่ feature ประดับ
+✓ ทีมเล็ก-กลาง — อยากเห็น impact ของงานตัวเองชัดๆ
+
+── DEALBREAKERS (Pass ทันที) ────────────
+✗ เงินต่ำกว่า 30K
+✗ Pure QA / Testing role
+✗ Implement ตาม spec เท่านั้น ไม่มี creative input
+✗ AI washing — บริษัทบอกว่าทำ AI แต่จริงๆ แค่ใช้ ChatGPT
+✗ บริษัทไม่มั่นคง / burn rate สูงผิดปกติ / ไม่มี revenue จริง
+✗ On-site 5 วัน + งานไม่ได้พิเศษมากพอ
+
+── RESUME VERSIONS & WHEN TO USE ────────
+เลือก version ที่ summary paragraph ตรงกับ tone/culture ของบริษัทนั้นมากที่สุด
+
+VERSION A — "AI Engineer / Production Systems"
+  ใช้กับ: Binance, Shopee, Inteltion, ArcFusion, Siam Piwat, SVI
+  Tone: Engineering-first, production mindset, "ฉัน build AI systems end-to-end และ ship ของจริง"
+  เน้น: end-to-end ownership, production deployment, fast tool adoption
+  เลือกเมื่อ JD ต้องการ: software engineer ที่ build AI จริง, full-stack + AI, ship to prod
+
+VERSION B — "Builder / Startup / Impact-driven"
+  ใช้กับ: FlowAccount, Honest, ArcFusion, startup ทั่วไป
+  Tone: Builder mindset, ship fast, explainability, real-world impact
+  เน้น: builder identity, learning fast, AI ที่คนใช้จริงและเข้าใจได้
+  เลือกเมื่อ JD ต้องการ: startup engineer, generalist builder, product-minded dev
+
+VERSION RHENUS — "Enterprise AI / Explainability / Non-tech Communication"
+  ใช้กับ: Rhenus Logistics, consulting firms, งานที่ต้อง explain AI ให้ business
+  Tone: Trust, transparency, "ฉัน build AI ที่คนไว้ใจได้และ explain ให้ทุกคนเข้าใจ"
+  เน้น: high-stakes AI, stakeholder communication, transparency
+  เลือกเมื่อ JD ต้องการ: enterprise AI, non-tech collaboration, regulated industry
+
+VERSION THINKNET — "ML/DL Depth / Stable Company / Product-driven"
+  ใช้กับ: THiNKNET, บริษัทที่เน้น ML/DL จริงๆ, stable Thai tech company
+  Tone: ML depth + production-grade + อยากโตในองค์กรมั่นคง
+  เน้น: deep learning expertise, PyTorch, production AI, long-term growth
+  เลือกเมื่อ JD ต้องการ: ML engineer, data scientist, AI researcher ใน stable company
+
+VERSION ACCENTURE — "Responsible AI / Enterprise / Consulting"
+  ใช้กับ: Accenture, Deloitte, Big 4, consulting firms, enterprise clients
+  Tone: Responsible AI, cross-functional, "transparent AI ไม่ใช่ optional"
+  เน้น: explainability, audit-ready AI, stakeholder collaboration, enterprise scale
+  เลือกเมื่อ JD ต้องการ: AI consultant, responsible AI, enterprise transformation
+
+VERSION FLOWACCOUNT — "Fintech Builder / SME Domain"
+  ใช้กับ: FlowAccount, fintech startup, งานที่เน้น builder + business domain
+  Tone: Builder + สนใจ SME/finance pain points จริงๆ
+  เน้น: ship fast, business domain empathy, experiment-driven
+  เลือกเมื่อ JD ต้องการ: product engineer ใน fintech/SME, domain-aware builder
+═══════════════════════════════════════════
 """
 
 ANALYSIS_PROMPT = """
-คุณคือ career advisor วิเคราะห์ JD นี้สำหรับผู้สมัคร:
+คุณคือ career advisor อาวุโสที่รู้จัก Thapanee (ทับทิม) ดีมาก
+วิเคราะห์ JD ด้านล่างให้เธออย่างตรงไปตรงมา เหมือนเพื่อนที่ทำงาน HR มาบอก
+
+══ CANDIDATE PROFILE ══
 {profile}
 
-JD:
+══ JD ที่ต้องวิเคราะห์ ══
 {jd_text}
 
-ตอบกลับเป็น JSON เท่านั้น ห้ามมี markdown backticks หรือข้อความอื่นนอกจาก JSON:
+══ วิธีคิดก่อน output ══
+ก่อน output JSON ให้คิดผ่าน 4 ข้อนี้ในใจก่อน (ไม่ต้องเขียนออกมา):
+1. บริษัทนี้ทำ AI จริงหรือ AI washing? — ดูจาก JD ว่า AI เป็น core หรือแค่ buzzword
+2. งานนี้ให้ ownership จริงหรือเปล่า? — design solution เองได้ หรือแค่ implement spec?
+3. culture fit กับทับทิมไหม? — fast learning, no bureaucracy, real impact?
+4. resume version ไหนเหมาะ? — match tone ของบริษัทและสิ่งที่ JD เน้น
+
+══ SCORING GUIDE ══
+fit_level:
+  high        = skill match ≥70% + culture fit + ไม่มี dealbreaker
+  medium-high = skill match ≥60% + culture fit หรือ skill match ≥70% แต่ culture มีข้อกังวล
+  medium      = skill match ≥50% หรือ culture fit แต่มีช่องว่างพอสมควร
+  low-medium  = skill match <50% หรือมี dealbreaker 1 ข้อ
+  low         = มี dealbreaker หลายข้อ หรือ mismatch ชัดเจน
+
+ai_depth_score (1-5):
+  5 = AI เป็น core product, ต้องทำ model / agent / production AI จริง
+  4 = AI สำคัญมาก มี engineering depth
+  3 = AI ใช้อยู่แต่ไม่ใช่ core
+  2 = AI แค่ tool ประกอบ
+  1 = แทบไม่มี AI / AI washing
+
+ownership_score (1-5):
+  5 = design + build + ship เอง, end-to-end ownership
+  4 = มี ownership สูง มีอิสระในการตัดสินใจ
+  3 = ปานกลาง มี spec แต่ยืดหยุ่นได้
+  2 = ส่วนใหญ่ implement ตาม spec
+  1 = pure execution, ไม่มี creative input
+
+apply_decision logic:
+  APPLY     = fit_level high/medium-high + ไม่มี dealbreaker + ai_depth≥3 + ownership≥3
+  WATCHLIST = fit_level medium + มีข้อดีชัดเจน + อาจรอดูข้อมูลเพิ่ม
+  PASS      = มี dealbreaker ชัด หรือ fit_level low/low-medium หรือ mismatch พื้นฐาน
+
+══ OUTPUT FORMAT ══
+ตอบกลับเป็น JSON เท่านั้น ห้ามมี markdown backticks หรือข้อความอื่นนอก JSON:
 
 {{
-  "job_title": "ชื่อตำแหน่ง",
+  "job_title": "ชื่อตำแหน่งจาก JD",
   "company_name": "ชื่อบริษัท",
-  "role_tier": "Tier1/2/3 - เหตุผลสั้นๆ",
+  "role_tier": "Tier1/2/3 — เหตุผล 1 ประโยค",
   "fit_level": "high/medium-high/medium/low-medium/low",
   "work_location": "เมือง/ย่าน",
   "wfh_policy": "WFH Available/Hybrid/On-site/Unknown",
@@ -483,32 +585,36 @@ JD:
   "ai_depth_score": 3,
   "ownership_score": 3,
   "my_skill_match_pct": 75,
-  "gap_skills": ["skill ที่ขาด"],
-  "resume_version": "VERSION A/B/RHENUS/THINKNET/ACCENTURE",
-  "resume_reason": "เหตุผลสั้นๆ",
+  "gap_skills": ["skill ที่ขาดจริงๆ ไม่ใช่แค่ nice-to-have"],
+  "resume_version": "VERSION A/B/RHENUS/THINKNET/ACCENTURE/FLOWACCOUNT",
+  "resume_reason": "เหตุผล 1-2 ประโยคว่าทำไม version นี้ถึง match tone ของบริษัทนี้",
   "apply_decision": "APPLY/WATCHLIST/PASS",
-  "apply_url": "ลิงค์สมัครงานโดยตรงจาก JD ถ้าไม่มีให้ใส่ค่าว่าง",
+  "apply_url": "ลิงค์สมัครโดยตรงจาก JD ถ้าไม่มีให้ใส่ค่าว่าง",
   "company_size": "startup/sme/enterprise",
-  "company_tier": "Level1/2/3 - เหตุผล",
+  "company_tier": "Level1/2/3 — เหตุผลสั้นๆ",
   "industry": "อุตสาหกรรม",
   "location": "Bangkok, Thailand",
   "website": "",
-  "gaps": "gap หลักสั้นๆ max 80 chars",
-  "notes": "note สำคัญ max 100 chars",
-  "narrative_analysis": "วิเคราะห์ละเอียดภาษาไทย: บริษัทเป็นยังไง / เงิน-สวัสดิการ / AI จริงหรือ AI washing / เติบโตได้ไหม / red flags / green flags / สรุป APPLY-WATCHLIST-PASS",
+  "gaps": "gap หลัก max 80 chars",
+  "notes": "สิ่งที่ต้องรู้ก่อน apply max 100 chars",
+  "narrative_analysis": "วิเคราะห์ละเอียดภาษาไทย ครอบคลุม: [1] บริษัทเป็นใคร ทำอะไร น่าเชื่อถือแค่ไหน [2] AI ที่บริษัทนี้ทำ — จริงหรือ washing? [3] งานนี้ให้ ownership และ creative input แค่ไหน [4] culture fit กับทับทิม — fast/no bureaucracy/real impact ไหม [5] เงินและสวัสดิการ [6] green flags และ red flags ที่เห็นใน JD [7] สรุป — ทำไมถึง APPLY/WATCHLIST/PASS พร้อมเหตุผลตรงๆ",
   "interview_prep": {{
-    "behavioral_questions": [{{"question": "?", "answer_guide": "?"}}],
-    "technical_questions":  [{{"question": "?", "answer_guide": "?"}}],
-    "questions_to_ask": ["คำถามถามกลับ employer"],
-    "salary_negotiation_script": "script ต่อรองเงินภาษาไทย"
+    "behavioral_questions": [
+      {{"question": "คำถาม behavioral ที่น่าจะถามสำหรับบริษัทนี้", "answer_guide": "แนวตอบที่ดึง project/experience ของทับทิมมาใช้"}}
+    ],
+    "technical_questions": [
+      {{"question": "คำถาม technical ตาม stack ของ JD นี้", "answer_guide": "แนวตอบพร้อมตัวอย่างจาก project จริง"}}
+    ],
+    "questions_to_ask": ["คำถามถามกลับ employer ที่ช่วยประเมิน culture/ownership/AI depth จริงๆ"],
+    "salary_negotiation_script": "script ต่อรองเงินภาษาไทย เหมาะกับ culture ของบริษัทนี้"
   }},
   "application_guide": {{
-    "how_to_apply": "วิธี apply",
-    "form_questions_to_prepare": ["คำถามในฟอร์มที่น่าจะเจอ"],
-    "things_to_prepare": ["สิ่งที่ต้องเตรียม"]
+    "how_to_apply": "วิธี apply และ channel ที่ดีที่สุด",
+    "form_questions_to_prepare": ["คำถามในฟอร์มหรือ screening ที่น่าจะเจอ"],
+    "things_to_prepare": ["สิ่งที่ต้องเตรียมก่อน apply เช่น portfolio, cover letter focus, etc."]
   }}
 }}
-ถ้า JD ดึงไม่ได้ให้ตอบ: {{"error": "ไม่สามารถดึง JD ได้", "job_title": "Unknown", "company_name": "Unknown"}}
+ถ้า JD ดึงไม่ได้หรือข้อมูลน้อยเกินไป: {{"error": "ไม่สามารถดึง JD ได้", "job_title": "Unknown", "company_name": "Unknown"}}
 """
 
 
