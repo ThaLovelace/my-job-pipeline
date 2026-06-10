@@ -57,9 +57,9 @@ st.markdown("""
 NOTION_TOKEN        = st.secrets["NOTION_TOKEN"]
 JOB_PIPELINE_DB_ID  = st.secrets["JOB_PIPELINE_DB_ID"]
 COMPANIES_DB_ID     = st.secrets["COMPANIES_DB_ID"]
-GEMINI_API_KEY      = st.secrets.get("GEMINI_API_KEY", "")
 OPENROUTER_API_KEY  = st.secrets.get("OPENROUTER_API_KEY", "")
 SCRAPERAPI_KEY      = st.secrets.get("SCRAPERAPI_KEY", "")
+GROQ_API_KEY        = st.secrets.get("GROQ_API_KEY", "")
 
 HEADERS = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
@@ -712,134 +712,90 @@ def fetch_jd(url):
     return None, " | ".join(errors)
 
 def _call_llm_raw(prompt, retries=2):
-    """Low-level LLM call — returns raw text string or raises RuntimeError"""
+    """Low-level LLM call — returns raw text string or raises RuntimeError
+    ใช้ Groq API (ฟรี) — llama-3.3-70b-versatile
+    """
+    if not GROQ_API_KEY:
+        raise RuntimeError("ไม่มี GROQ_API_KEY ใน secrets")
 
-    # ── OpenRouter ──────────────────────────────────────────
-    if OPENROUTER_API_KEY:
-        models = [
-            "openai/gpt-oss-120b:free",
-            "nvidia/nemotron-3-super-120b-a12b:free",
-            "google/gemma-4-31b-it:free",
-            "nvidia/nemotron-3-nano-30b-a3b:free",
-            "openai/gpt-oss-20b:free",
-        ]
-        last_err = ""
-        for model in models:
-            for attempt in range(retries):
-                resp = None
-                try:
-                    resp = requests.post(
-                        "https://openrouter.ai/api/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                            "Content-Type": "application/json",
-                        },
-                        json={
-                            "model": model,
-                            "messages": [{"role": "user", "content": prompt}],
-                            "max_tokens": 4096,
-                            "temperature": 0.3,
-                        },
-                        timeout=60,
-                    )
-                    resp.raise_for_status()
-                    return resp.json()["choices"][0]["message"]["content"]
-                except requests.exceptions.HTTPError as e:
-                    status = resp.status_code if resp is not None else 0
-                    last_err = f"{model} HTTP {status}"
-                    if status == 402:
-                        break
-                    if status in (429, 503, 529) and attempt < retries - 1:
-                        time.sleep(15 if status == 429 else 5)
-                        continue
-                    break
-                except requests.exceptions.Timeout:
-                    last_err = f"{model} timeout"
-                    break
-                except Exception as e:
-                    last_err = f"{model}: {e}"
-                    break
-        if not GEMINI_API_KEY:
-            raise RuntimeError(f"OpenRouter ล้มเหลวทุก model — {last_err}")
-
-    # ── Gemini fallback ─────────────────────────────────────
-    if not GEMINI_API_KEY:
-        raise RuntimeError("ไม่มี OPENROUTER_API_KEY หรือ GEMINI_API_KEY ใน secrets")
-
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        "gemini-2.0-flash-lite:generateContent?key=" + GEMINI_API_KEY
-    )
-    for attempt in range(retries):
-        resp = None
-        try:
-            resp = requests.post(
-                url,
-                json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"temperature": 0.3, "maxOutputTokens": 8192},
-                },
-                timeout=90,
-            )
-            resp.raise_for_status()
-            return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-        except requests.exceptions.HTTPError as e:
-            error_body = {}
+    models = [
+        "llama-3.3-70b-versatile",  # ฉลาด instruction following ดี
+        "llama-3.1-8b-instant",     # fallback เมื่อ rate limit
+    ]
+    last_err = ""
+    for model in models:
+        for attempt in range(retries):
+            resp = None
             try:
-                error_body = resp.json()
-            except Exception:
-                pass
-            error_msg    = error_body.get("error", {}).get("message", str(e))
-            error_status = error_body.get("error", {}).get("status", "")
-            if resp is not None and resp.status_code == 429:
-                if error_status == "RESOURCE_EXHAUSTED" or "quota" in error_msg.lower():
-                    retry_match = re.search(r"retry in ([\d.]+)s", error_msg)
-                    if retry_match and attempt < retries - 1:
-                        time.sleep(float(retry_match.group(1)) + 5)
-                        continue
-                    raise RuntimeError("Gemini quota หมดแล้ว — รอถึงพรุ่งนี้หรือเพิ่ม billing")
-                if attempt < retries - 1:
-                    time.sleep((attempt + 1) * 30)
+                resp = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {GROQ_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 4096,
+                        "temperature": 0.3,
+                    },
+                    timeout=60,
+                )
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"]["content"]
+            except requests.exceptions.HTTPError as e:
+                status = resp.status_code if resp is not None else 0
+                last_err = f"{model} HTTP {status}"
+                if status == 429 and attempt < retries - 1:
+                    retry_after = int(resp.headers.get("retry-after", 30))
+                    time.sleep(retry_after + 2)
                     continue
-            elif resp is not None and resp.status_code == 503 and attempt < retries - 1:
-                time.sleep((attempt + 1) * 10)
-                continue
-            raise RuntimeError(f"{str(e)} | {error_msg}")
-        except RuntimeError:
-            raise
-        except Exception as e:
-            raise RuntimeError(str(e))
-    raise RuntimeError("LLM retry หมดแล้ว")
+                if status in (503, 529) and attempt < retries - 1:
+                    time.sleep(10)
+                    continue
+                break
+            except requests.exceptions.Timeout:
+                last_err = f"{model} timeout"
+                break
+            except Exception as ex:
+                last_err = f"{model}: {ex}"
+                break
+    raise RuntimeError(f"Groq ล้มเหลวทุก model — {last_err}")
+
 
 # Prompt สำหรับ Call 1 — extract facts จาก JD เท่านั้น ไม่ต้องรู้จัก candidate
 JD_EXTRACT_PROMPT = """
-Extract structured information from this job description. Reply ONLY with valid JSON, no markdown backticks, no extra text.
+Extract structured information from the job description below.
+Reply ONLY with valid JSON. No markdown. No backticks. No extra text.
 
-IMPORTANT: You MUST fill in "job_title" and "company_name" from the JD text. Never leave them empty.
-- job_title: the exact position name from the JD (e.g. "Data Engineer", "AI Developer")
-- company_name: the hiring company name. If not stated, write "Not specified"
+Rules:
+- job_title: exact position name (e.g. "Data Engineer", "AI Developer"). NEVER leave empty.
+- company_name: hiring company name. If not stated anywhere, use "Not specified".
+- Look for company name in: page title, "About us", "About the company", copyright footer, or any brand name mentioned.
+- salary_min / salary_max: numbers in THB only, null if not stated.
+- wfh_policy: one of "WFH Available" / "Hybrid" / "On-site" / "Unknown"
 
 JD:
 {jd_text}
 
-Return this exact JSON structure:
+JSON structure to return:
 {{
-  "job_title": "<position name from JD — REQUIRED, never empty>",
-  "company_name": "<company name from JD — REQUIRED, use 'Not specified' if truly absent>",
-  "work_location": "<city or region, null if unknown>",
-  "wfh_policy": "<one of: WFH Available / Hybrid / On-site / Unknown>",
-  "salary_min": <number in THB or null>,
-  "salary_max": <number in THB or null>,
+  "job_title": "<exact position — required>",
+  "company_name": "<company name or 'Not specified'>",
+  "work_location": "<city/area or null>",
+  "wfh_policy": "<WFH Available|Hybrid|On-site|Unknown>",
+  "salary_min": <THB number or null>,
+  "salary_max": <THB number or null>,
   "min_experience_years": <number or null>,
-  "fresh_grad_welcome": <true/false/null>,
-  "key_tech_stack": "<comma-separated tech stack>",
-  "core_responsibilities": ["<up to 5 bullet points>"],
-  "must_have_skills": ["<hard requirements only>"],
-  "nice_to_have_skills": ["<explicitly stated as nice-to-have>"],
-  "company_size": "<e.g. 50-200 employees, or null>",
-  "industry": "<e.g. HR Tech, Fintech, null>",
-  "apply_url": "<application URL or null>",
-  "website": "<company website or null>"
+  "fresh_grad_welcome": <true|false|null>,
+  "key_tech_stack": "<comma-separated tech>",
+  "core_responsibilities": ["<up to 5 items>"],
+  "must_have_skills": ["<required skills only>"],
+  "nice_to_have_skills": ["<nice-to-have only>"],
+  "company_size": "<e.g. 50-200 or null>",
+  "industry": "<e.g. HR Tech, Fintech or null>",
+  "apply_url": "<URL or null>",
+  "website": "<URL or null>"
 }}
 """
 
@@ -927,7 +883,7 @@ apply_decision:
 
 def analyze_with_llm(jd_text, retries=2):
     # ── Call 1: Extract job facts จาก JD (~2000 tokens) ────
-    extract_prompt = JD_EXTRACT_PROMPT.format(jd_text=jd_text[:4000])
+    extract_prompt = JD_EXTRACT_PROMPT.format(jd_text=jd_text[:6000])
     try:
         raw1 = _call_llm_raw(extract_prompt, retries=retries)
         raw1 = re.sub(r"^```json\s*", "", raw1.strip())
@@ -952,26 +908,24 @@ def analyze_with_llm(jd_text, retries=2):
     except RuntimeError as e:
         return {"error": str(e), "job_title": "Unknown", "company_name": "Unknown"}
 
-    # ── Merge: รวม job_facts + fit_data โดย prefer ค่าที่ไม่ว่าง ──────────
-    result = {**job_facts, **fit_data}
+    # ── Merge: fit_data เป็น base, job_facts ชนะสำหรับ key ที่มีค่าจริง ──
+    result = {**fit_data, **job_facts}
 
-    # สำหรับ key สำคัญ: ถ้าค่าปัจจุบันว่าง ("", None, []) ให้หยิบจากอีก dict มาแทน
+    # สำหรับทุก key: ใช้ค่าแรกที่ไม่ว่างจาก job_facts → fit_data → default
     CORE_KEYS = [
-        ("job_title",     "Unknown"),
-        ("company_name",  "Unknown"),
-        ("work_location", ""),
-        ("wfh_policy",    "Unknown"),
-        ("key_tech_stack",""),
-        ("industry",      ""),
-        ("website",       ""),
-        ("apply_url",     ""),
-        ("salary_min",    None),
-        ("salary_max",    None),
+        ("job_title",      "Unknown"),
+        ("company_name",   "Not specified"),
+        ("work_location",  ""),
+        ("wfh_policy",     "Unknown"),
+        ("key_tech_stack", ""),
+        ("industry",       ""),
+        ("website",        ""),
+        ("apply_url",      ""),
+        ("salary_min",     None),
+        ("salary_max",     None),
     ]
     for key, default in CORE_KEYS:
-        # ลอง job_facts ก่อน แล้ว fit_data ถ้ายังว่าง
-        val = job_facts.get(key) or fit_data.get(key) or default
-        result[key] = val
+        result[key] = job_facts.get(key) or fit_data.get(key) or default
 
     return result
 
@@ -1063,8 +1017,8 @@ def analysis_to_notion_dicts(a, job_url):
 with tab3:
     st.markdown("วิเคราะห์ job จาก URL เดี่ยว หรืออัปโหลด CSV รายการ URL → LLM → Notion ค่ะ")
 
-    if not OPENROUTER_API_KEY and not GEMINI_API_KEY:
-        st.warning("⚠️ ยังไม่มี `OPENROUTER_API_KEY` หรือ `GEMINI_API_KEY` ใน Streamlit Secrets ค่ะ")
+    if not GROQ_API_KEY:
+        st.warning("⚠️ ยังไม่มี `GROQ_API_KEY` ใน Streamlit Secrets ค่ะ")
 
     delay       = st.slider("หน่วงเวลาระหว่าง request (วินาที)", 5, 30, 12,
                             help="แนะนำ 12+ วินาที เพื่อหลีกเลี่ยง rate limit")
