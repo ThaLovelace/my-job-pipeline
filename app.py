@@ -57,6 +57,7 @@ st.markdown("""
 NOTION_TOKEN        = st.secrets["NOTION_TOKEN"]
 JOB_PIPELINE_DB_ID  = st.secrets["JOB_PIPELINE_DB_ID"]
 COMPANIES_DB_ID     = st.secrets["COMPANIES_DB_ID"]
+JOB_LISTING_DB_ID   = st.secrets.get("JOB_LISTING_DB_ID", "")
 OPENROUTER_API_KEY  = st.secrets.get("OPENROUTER_API_KEY", "")
 SCRAPERAPI_KEY      = st.secrets.get("SCRAPERAPI_KEY", "")
 GROQ_API_KEY        = st.secrets.get("GROQ_API_KEY", "")
@@ -231,6 +232,103 @@ def create_job(d, company_page_id, opt):
     if "id" in result:
         return True, None
     return False, result.get("message", "unknown error")
+
+# ── Job Listing DB helpers ───────────────────────────────
+
+def _get_listing_status_options():
+    """ดึง select options จาก Job Listing DB สำหรับ fuzzy match"""
+    if not JOB_LISTING_DB_ID:
+        return []
+    try:
+        res = requests.get("https://api.notion.com/v1/databases/" + JOB_LISTING_DB_ID, headers=HEADERS)
+        props = res.json().get("properties", {})
+        # หา property ที่เป็น select หรือ status สำหรับ status column
+        for name in ("Status", "status", "สถานะ"):
+            prop = props.get(name, {})
+            opts = prop.get("select", {}).get("options", []) or prop.get("status", {}).get("options", [])
+            if opts:
+                return [o["name"] for o in opts]
+    except Exception:
+        pass
+    return []
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_listing_status_map():
+    """คืน dict mapping ชื่อ canonical → ชื่อจริงใน Notion (fuzzy)"""
+    options = _get_listing_status_options()
+    return {
+        "consider":   fuzzy_match("Consider",  options, cutoff=0.5) or "Consider",
+        "added":      fuzzy_match("Added",      options, cutoff=0.5) or "Added",
+        "not_apply":  fuzzy_match("Not Apply",  options, cutoff=0.5) or "Not Apply",
+    }
+
+def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_key="consider", error_note=""):
+    """
+    สร้างหรืออัปเดต row ใน Job Listing DB
+    - ถ้ายังไม่มี URL นี้ → สร้างใหม่
+    - ถ้ามีแล้ว → อัปเดตเฉพาะ field ที่ส่งมา
+    status_key: "consider" | "added" | "not_apply"
+    """
+    if not JOB_LISTING_DB_ID:
+        return None, "ไม่มี JOB_LISTING_DB_ID"
+
+    status_map = get_listing_status_map()
+    status_name = status_map.get(status_key, status_key)
+
+    # ค้นหา row เดิมด้วย URL
+    existing_id = None
+    try:
+        res = requests.post(
+            f"https://api.notion.com/v1/databases/{JOB_LISTING_DB_ID}/query",
+            headers=HEADERS,
+            json={"filter": {"property": "URL", "url": {"equals": url}}}
+        )
+        rows = res.json().get("results", [])
+        if rows:
+            existing_id = rows[0]["id"]
+    except Exception:
+        pass
+
+    # สร้าง properties payload
+    props = {
+        "Status": {"select": {"name": status_name}},
+    }
+    if job_title:
+        props["Name"] = {"title": [{"text": {"content": job_title[:200]}}]}
+    if company_name:
+        props["Company"] = {"rich_text": [{"text": {"content": company_name[:200]}}]}
+    if url:
+        props["URL"] = {"url": url}
+    if jd_raw:
+        # JD อาจยาวมาก — เก็บใน rich_text สูงสุด 2000 chars
+        props["JD"] = {"rich_text": [{"text": {"content": jd_raw[:2000]}}]}
+    if error_note:
+        # เก็บ error ไว้ใน notes ของ row
+        props["Notes"] = {"rich_text": [{"text": {"content": error_note[:500]}}]}
+
+    try:
+        if existing_id:
+            res = requests.patch(
+                f"https://api.notion.com/v1/pages/{existing_id}",
+                headers=HEADERS,
+                json={"properties": props}
+            )
+        else:
+            # สร้างใหม่ — ต้องมี Name เสมอ ถ้าไม่มีให้ใช้ URL แทน
+            if "Name" not in props:
+                props["Name"] = {"title": [{"text": {"content": (job_title or url)[:200]}}]}
+            res = requests.post(
+                "https://api.notion.com/v1/pages",
+                headers=HEADERS,
+                json={"parent": {"database_id": JOB_LISTING_DB_ID}, "properties": props}
+            )
+        result = res.json()
+        if "id" in result:
+            return result["id"], None
+        return None, result.get("message", "unknown error")
+    except Exception as e:
+        return None, str(e)
+
 
 def query_all_jobs(filter_payload):
     results = []
@@ -816,12 +914,17 @@ FIT_ANALYSIS_PROMPT = """
 ══ JOB DATA (extracted จาก JD แล้ว) ══
 {job_data_json}
 
+══ COMPANY RESEARCH (ดึงจาก web จริง — ใช้ประกอบการวิเคราะห์) ══
+{company_research}
+
 ══ วิธีคิดก่อน output ══
 คิดผ่าน 4 ข้อนี้ในใจก่อน (ไม่ต้องเขียนออกมา):
-1. บริษัทนี้ทำ AI จริงหรือ AI washing?
+1. บริษัทนี้ทำ AI จริงหรือ AI washing? — ดูจากทั้ง JD และ company research
 2. งานนี้ให้ ownership จริงหรือเปล่า?
-3. culture fit กับทับทิมไหม?
+3. culture fit กับทับทิมไหม? — ใช้ข้อมูลจาก company research ประกอบ (Glassdoor, news, funding)
 4. resume version ไหนเหมาะ?
+
+หมายเหตุ: ถ้า company research บอกว่า "ไม่พบข้อมูล" ให้วิเคราะห์จาก JD อย่างเดียวและระบุในวิเคราะห์ว่าข้อมูลบริษัทจำกัด
 
 ══ SCORING GUIDE ══
 fit_level:
@@ -867,16 +970,16 @@ apply_decision:
   "location": "Bangkok, Thailand",
   "gaps": "gap หลัก max 80 chars",
   "notes": "สิ่งที่ต้องรู้ก่อน apply max 100 chars",
-  "narrative_analysis": "วิเคราะห์ละเอียดภาษาไทย ครอบคลุม: [1] บริษัทเป็นใคร ทำอะไร น่าเชื่อถือแค่ไหน [2] AI ที่บริษัทนี้ทำ — จริงหรือ washing? [3] งานนี้ให้ ownership และ creative input แค่ไหน [4] culture fit กับทับทิม [5] เงินและสวัสดิการ [6] green flags และ red flags [7] สรุปพร้อมเหตุผลตรงๆ",
+  "narrative_analysis": "วิเคราะห์ละเอียดภาษาไทย ครอบคลุม: [1] บริษัทเป็นใคร ทำอะไร น่าเชื่อถือแค่ไหน — อิงจาก research จริง ไม่ใช่แค่ JD [2] AI ที่บริษัทนี้ทำ — จริงหรือ washing? มีหลักฐานจาก web ไหม [3] งานนี้ให้ ownership และ creative input แค่ไหน [4] culture จริงๆ เป็นยังไง — Glassdoor บอกว่าไง ข่าวล่าสุดบอกอะไร [5] เงินและสวัสดิการ [6] green flags และ red flags ที่เห็นจากทั้ง JD และ research [7] สรุปพร้อมเหตุผลตรงๆ",
   "interview_prep": {{
     "behavioral_questions": [
-      {{"question": "คำถาม behavioral", "answer_guide": "แนวตอบดึง project ของทับทิม"}}
+      {{"question": "คำถาม behavioral ที่ตรงกับ culture บริษัทนี้จริงๆ", "answer_guide": "แนวตอบดึง project ของทับทิม"}}
     ],
     "technical_questions": [
       {{"question": "คำถาม technical ตาม stack ของ JD", "answer_guide": "แนวตอบพร้อมตัวอย่างจาก project จริง"}}
     ],
-    "questions_to_ask": ["คำถามถามกลับ employer"],
-    "salary_negotiation_script": "script ต่อรองเงินภาษาไทย"
+    "questions_to_ask": ["คำถามถามกลับ employer — อิงจาก red flags หรือสิ่งที่อยากรู้จาก research"],
+    "salary_negotiation_script": "script ต่อรองเงินภาษาไทย เหมาะกับ culture ของบริษัทนี้"
   }},
   "application_guide": {{
     "how_to_apply": "วิธี apply และ channel ที่ดีที่สุด",
@@ -885,6 +988,81 @@ apply_decision:
   }}
 }}
 """
+
+
+def _scrape_text(url, max_chars=2000):
+    """ดึง text จาก URL ด้วย ScraperAPI ก่อน แล้ว fallback requests"""
+    text, _ = _fetch_with_scraperapi(url) if SCRAPERAPI_KEY else (None, "no key")
+    if not text:
+        text, _ = _fetch_with_requests(url)
+    return (text or "")[:max_chars]
+
+
+def research_company(company_name, website=""):
+    """
+    ดึงข้อมูลบริษัทจาก web จริงๆ — ใช้ ScraperAPI ที่มีอยู่แล้ว
+    คืน string สรุปข้อมูลที่ดึงได้ หรือ "ไม่พบข้อมูล" ถ้าทำไม่ได้
+    """
+    if not company_name or company_name.lower() in ("unknown", "not specified", ""):
+        return "ไม่ทราบชื่อบริษัท — ไม่สามารถ research ได้"
+
+    sections = []
+
+    # ── 1. Google search: บริษัท + glassdoor/crunchbase/linkedin ──
+    search_queries = [
+        f"{company_name} Thailand company review Glassdoor",
+        f"{company_name} funding revenue crunchbase",
+        f"{company_name} layoff news 2024 2025",
+    ]
+    for query in search_queries:
+        try:
+            encoded = requests.utils.quote(query, safe="")
+            # ใช้ DuckDuckGo HTML (ไม่มี API key) เป็น free search
+            ddg_url = f"https://html.duckduckgo.com/html/?q={encoded}"
+            soup_text = _scrape_text(ddg_url, max_chars=1500)
+            if soup_text and len(soup_text) > 100:
+                # ตัดเอาแค่ snippet ที่ mention ชื่อบริษัท
+                lines = [l.strip() for l in soup_text.splitlines()
+                         if company_name.lower()[:6] in l.lower() and len(l.strip()) > 30]
+                if lines:
+                    sections.append(f"[Search: {query[:50]}]\n" + "\n".join(lines[:5]))
+        except Exception:
+            pass
+
+    # ── 2. เว็บบริษัทโดยตรง (About / Careers page) ──
+    targets = []
+    if website:
+        targets.append(website)
+        # ลอง /about และ /careers ด้วย
+        base = website.rstrip("/")
+        targets += [f"{base}/about", f"{base}/about-us", f"{base}/careers"]
+
+    for url in targets[:3]:
+        try:
+            text = _scrape_text(url, max_chars=1500)
+            if text and len(text) > 150:
+                sections.append(f"[เว็บบริษัท: {url[:60]}]\n{text[:1500]}")
+                break  # ได้แล้วพอ
+        except Exception:
+            pass
+
+    # ── 3. Glassdoor direct search ──
+    try:
+        gd_url = f"https://www.glassdoor.com/Search/results.htm?keyword={requests.utils.quote(company_name)}"
+        gd_text = _scrape_text(gd_url, max_chars=1500)
+        if gd_text and len(gd_text) > 100:
+            lines = [l.strip() for l in gd_text.splitlines()
+                     if any(k in l.lower() for k in ("rating", "review", "recommend", "culture", "salary", "คะแนน"))
+                     and len(l.strip()) > 20]
+            if lines:
+                sections.append(f"[Glassdoor]\n" + "\n".join(lines[:8]))
+    except Exception:
+        pass
+
+    if not sections:
+        return f"ไม่พบข้อมูลบริษัท '{company_name}' จาก web — วิเคราะห์จาก JD เท่านั้น"
+
+    return "\n\n".join(sections)[:4000]
 
 
 def analyze_with_llm(jd_text, retries=2):
@@ -903,10 +1081,16 @@ def analyze_with_llm(jd_text, retries=2):
     except RuntimeError as e:
         return {"error": str(e), "job_title": "Unknown", "company_name": "Unknown"}
 
+    # ── Call 1.5: Research บริษัทจาก web ────────────────────
+    company_name = job_facts.get("company_name", "")
+    website      = job_facts.get("website", "")
+    company_research = research_company(company_name, website)
+
     # ── Call 2: วิเคราะห์ fit (~3500 tokens) ───────────────
     fit_prompt = FIT_ANALYSIS_PROMPT.format(
         profile=CANDIDATE_PROFILE,
         job_data_json=json.dumps(job_facts, ensure_ascii=False, indent=2),
+        company_research=company_research,
     )
     try:
         raw2 = _call_llm_raw(fit_prompt, retries=retries)
@@ -1146,6 +1330,10 @@ with tab3:
                     add_log(f"  ⏭️ ข้ามไปก่อนเลยค่ะ — ไม่ส่งเข้า LLM")
                     stats["err"] += 1
                     results.append({"url": url, "name": name, "status": "error", "error": fetch_err})
+                    # บันทึก error ลง Job Listing DB
+                    if JOB_LISTING_DB_ID:
+                        _, lerr = upsert_job_listing(url, error_note=f"Fetch failed: {fetch_err}")
+                        add_log(f"  📋 Listing saved (error){'' if not lerr else f' — {lerr}'}")
                     if i < len(jobs) - 1:
                         time.sleep(delay)
                     continue
@@ -1153,16 +1341,37 @@ with tab3:
 
             add_log(f"  🤖 Analyzing with LLM...")
             analysis = analyze_with_llm(jd)
+            # แสดงว่า research บริษัทได้ข้อมูลไหม
+            cn_for_log = analysis.get("company_name", "?")
+            research_status = "🔍 researched" if cn_for_log not in ("?", "Unknown", "Not specified", "") else "⚠️ no research"
+            add_log(f"  {research_status}: {cn_for_log}")
 
             if "error" in analysis and analysis.get("job_title", "Unknown") == "Unknown" and analysis.get("company_name", "Unknown") == "Unknown":
                 add_log(f"  ❌ {analysis['error']}")
                 stats["err"] += 1
                 results.append({"url": url, "name": name, "status": "error", "error": analysis["error"]})
+                # บันทึก LLM error ลง Job Listing
+                if JOB_LISTING_DB_ID:
+                    upsert_job_listing(url, jd_raw=jd[:2000] if 'jd' in dir() else "",
+                                       error_note=f"LLM error: {analysis.get('error','')}")
             else:
-                add_log(f"  ✅ {analysis.get('job_title','?')} @ {analysis.get('company_name','?')} "
+                jt = analysis.get('job_title', '?')
+                cn = analysis.get('company_name', '?')
+                add_log(f"  ✅ {jt} @ {cn} "
                         f"| {analysis.get('fit_level','?')} | {analysis.get('apply_decision','?')}")
                 stats["ok"] += 1
                 result_entry = {"url": url, "name": name, "status": "ok", "analysis": analysis}
+
+                # บันทึกสถานะ Consider + ข้อมูลดิบลง Job Listing ทันที
+                if JOB_LISTING_DB_ID:
+                    _, lerr = upsert_job_listing(
+                        url,
+                        job_title=jt,
+                        company_name=cn,
+                        jd_raw=jd[:2000] if 'jd' in dir() else "",
+                        status_key="consider",
+                    )
+                    add_log(f"  📋 Listing: Consider{'' if not lerr else f' (warn: {lerr})'}")
 
                 if push_notion:
                     add_log(f"  📤 Pushing to Notion...")
@@ -1170,10 +1379,10 @@ with tab3:
                         j_data, c_data = analysis_to_notion_dicts(analysis, url)
                         if not j_data.get("job_title", "").strip():
                             raise ValueError("no job title")
-                        cn = c_data.get("company_name", "").strip()
-                        if not cn or cn.lower() in ("not specified", "unknown", ""):
-                            raise ValueError(f"company name ว่างหรือไม่ชัดเจน ('{cn}') — กรุณาระบุชื่อบริษัทเองค่ะ")
-                        company_id, found = search_company(cn)
+                        cname = c_data.get("company_name", "").strip()
+                        if not cname or cname.lower() in ("not specified", "unknown", ""):
+                            raise ValueError(f"company name ว่างหรือไม่ชัดเจน ('{cname}') — กรุณาระบุชื่อบริษัทเองค่ะ")
+                        company_id, found = search_company(cname)
                         if not found or not company_id:
                             company_id, err = create_company(c_data, opt)
                             if err:
@@ -1183,9 +1392,18 @@ with tab3:
                             raise ValueError(f"create job: {err_job}")
                         add_log(f"  ✅ Notion OK")
                         stats["notion_ok"] += 1
+
+                        # อัปเดต Listing ตาม apply_decision
+                        if JOB_LISTING_DB_ID:
+                            decision = analysis.get("apply_decision", "").upper()
+                            listing_status = "added" if decision == "APPLY" else "not_apply"
+                            upsert_job_listing(url, status_key=listing_status)
+                            add_log(f"  📋 Listing: {'Added' if listing_status == 'added' else 'Not Apply'}")
+
                     except Exception as e:
                         add_log(f"  ❌ Notion error: {e}")
                         stats["notion_err"] += 1
+                        # Listing คง Consider ไว้ (ไม่เปลี่ยน) เพื่อให้รู้ว่ายังค้างอยู่
 
                 results.append(result_entry)
 
@@ -1221,7 +1439,18 @@ with tab3:
                             with st.spinner("วิเคราะห์อยู่..."):
                                 a2 = analyze_with_llm(manual_text.strip())
                             if "error" not in a2 or a2.get("job_title") != "Unknown":
-                                st.success(f"✅ {a2.get('job_title','?')} @ {a2.get('company_name','?')}")
+                                jt2 = a2.get('job_title', '?')
+                                cn2_display = a2.get('company_name', '?')
+                                st.success(f"✅ {jt2} @ {cn2_display}")
+                                # บันทึก Consider ก่อนเลย
+                                if JOB_LISTING_DB_ID:
+                                    upsert_job_listing(
+                                        fr["url"],
+                                        job_title=jt2,
+                                        company_name=cn2_display,
+                                        jd_raw=manual_text.strip()[:2000],
+                                        status_key="consider",
+                                    )
                                 if push_notion:
                                     try:
                                         j2, c2 = analysis_to_notion_dicts(a2, fr["url"])
@@ -1237,6 +1466,11 @@ with tab3:
                                         ok2, jerr = create_job(j2, cid, opt)
                                         if ok2:
                                             st.success("📤 Push Notion สำเร็จค่ะ!")
+                                            # อัปเดต Listing สถานะ
+                                            if JOB_LISTING_DB_ID:
+                                                d2 = a2.get("apply_decision", "").upper()
+                                                upsert_job_listing(fr["url"],
+                                                    status_key="added" if d2 == "APPLY" else "not_apply")
                                         else:
                                             st.error(f"Notion error: {jerr}")
                                     except Exception as ex:
