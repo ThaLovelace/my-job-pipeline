@@ -613,10 +613,11 @@ def analyze_with_llm(jd_text, retries=2):
     if OPENROUTER_API_KEY:
         # เรียง model จากดี → สำรอง; openrouter/auto = ให้ OpenRouter เลือก free model เองค่ะ
         models = [
-            "google/gemma-4-31b-it:free",
-            "meta-llama/llama-3.3-70b-instruct:free",
-            "deepseek/deepseek-r1-distill-llama-70b:free",
-            "openrouter/auto",                            # fallback: OpenRouter เลือกเอง
+            "openai/gpt-oss-120b:free",                  # OpenAI MoE 120B — แรงสุด
+            "nvidia/nemotron-3-super-120b-a12b:free",    # NVIDIA 120B MoE — 1M context
+            "google/gemma-4-31b-it:free",                # Google Gemma 4 31B
+            "nvidia/nemotron-3-nano-30b-a3b:free",       # NVIDIA 30B — fallback
+            "openai/gpt-oss-20b:free",                   # OpenAI 20B — fallback เบาสุด
         ]
         last_err = ""
         for model in models:
@@ -645,6 +646,9 @@ def analyze_with_llm(jd_text, retries=2):
                 except requests.exceptions.HTTPError as e:
                     status = resp.status_code if resp is not None else 0
                     last_err = f"{model} HTTP {status}"
+                    if status == 402:
+                        # Payment required — model นี้ไม่ฟรี ข้ามไปทันทีค่ะ
+                        break
                     if status == 429 and attempt < retries - 1:
                         time.sleep(15)
                         continue
@@ -658,9 +662,9 @@ def analyze_with_llm(jd_text, retries=2):
                 except Exception as e:
                     last_err = f"{model}: {e}"
                     break
-        # ล้มทุก model — ไม่มี Gemini key ให้ return error เลยค่ะ
+        # OpenRouter ล้มทุก model — ลอง Gemini ต่อถ้ามี key ค่ะ
         if not GEMINI_API_KEY:
-            return {"error": f"OpenRouter ล้มเหลวทุก model ({last_err}) และไม่มี GEMINI_API_KEY"}
+            return {"error": f"OpenRouter ล้มเหลวทุก model — {last_err} (ลอง refresh หรือรอสักครู่แล้วลองใหม่นะคะ)"}
 
     # ── fallback: Gemini direct ─────────────────────────────
     if not GEMINI_API_KEY:
