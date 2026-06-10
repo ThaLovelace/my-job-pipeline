@@ -145,22 +145,30 @@ def search_company(name):
 
 def create_company(d, opt):
     def sel(raw, choices):
-        return sanitize_select(fuzzy_match(raw, choices))
+        v = sanitize_select(fuzzy_match(raw, choices))
+        return v if v else None  # คืน None ถ้าว่าง
 
-    payload = {
-        "parent": {"database_id": COMPANIES_DB_ID},
-        "properties": {
-            "Company Name": {"title": [{"text": {"content": d["company_name"]}}]},
-            "Company Size": {"select": {"name": sel(d.get("company_size", ""), opt["company"]["Company Size"])}},
-            "Company Tier": {"select": {"name": sel(d.get("company_tier", ""), opt["company"]["Company Tier"])}},
-            "Industry":     {"select": {"name": sel(d.get("industry", ""),     opt["company"]["Industry"])}},
-            "Location":     {"rich_text": [{"text": {"content": d.get("location", "")}}]},
-            "WFH Policy":   {"select": {"name": sel(d.get("wfh_policy", ""),  opt["company"]["WFH Policy"])}},
-            "Notes":        {"rich_text": [{"text": {"content": d.get("notes", "")}}]}
-        }
+    props = {
+        "Company Name": {"title": [{"text": {"content": d["company_name"]}}]},
+        "Location":     {"rich_text": [{"text": {"content": d.get("location", "")}}]},
+        "Notes":        {"rich_text": [{"text": {"content": d.get("notes", "")}}]},
     }
+
+    # ใส่ select เฉพาะตอนที่มีค่าเท่านั้น — Notion จะ error ถ้าส่ง name: ""
+    for field, key in [
+        ("Company Size", "company_size"),
+        ("Company Tier", "company_tier"),
+        ("Industry",     "industry"),
+        ("WFH Policy",   "wfh_policy"),
+    ]:
+        v = sel(d.get(key, ""), opt["company"][field])
+        if v:
+            props[field] = {"select": {"name": v}}
+
+    payload = {"parent": {"database_id": COMPANIES_DB_ID}, "properties": props}
     if d.get("website"):
         payload["properties"]["Website"] = {"url": d["website"]}
+
     res = requests.post("https://api.notion.com/v1/pages", headers=HEADERS, json=payload)
     result = res.json()
     if "id" not in result:
@@ -503,10 +511,15 @@ JD:
 
 def fetch_jd(url):
     hdrs = {
-        "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                        "AppleWebKit/537.36 (KHTML, like Gecko) "
                        "Chrome/124.0.0.0 Safari/537.36"),
-        "Accept-Language": "th-TH,th;q=0.9,en;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "th-TH,th;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Referer": "https://www.google.com/",
     }
     if "facebook.com" in url:
         return f"[Facebook — กรุณา copy JD มาวางเอง]\nURL: {url}"
@@ -535,26 +548,35 @@ def fetch_jd(url):
     return "[ไม่สามารถดึง content ได้]"
 
 
-def analyze_with_gemini(jd_text):
+def analyze_with_gemini(jd_text, retries=3):
     if not GEMINI_API_KEY:
         return {"error": "ไม่มี GEMINI_API_KEY ใน secrets"}
     url = ("https://generativelanguage.googleapis.com/v1beta/models/"
            "gemini-2.5-flash:generateContent?key=" + GEMINI_API_KEY)
     prompt = ANALYSIS_PROMPT.format(profile=CANDIDATE_PROFILE, jd_text=jd_text[:5000])
-    try:
-        resp = requests.post(url, json={
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 4096}
-        }, timeout=60)
-        resp.raise_for_status()
-        raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-        raw = re.sub(r"^```json\s*", "", raw.strip())
-        raw = re.sub(r"```\s*$", "", raw.strip())
-        return json.loads(raw)
-    except json.JSONDecodeError as e:
-        return {"error": f"JSON parse error: {e}"}
-    except Exception as e:
-        return {"error": str(e)}
+
+    for attempt in range(retries):
+        try:
+            resp = requests.post(url, json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.3, "maxOutputTokens": 4096}
+            }, timeout=60)
+            resp.raise_for_status()
+            raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+            raw = re.sub(r"^```json\s*", "", raw.strip())
+            raw = re.sub(r"```\s*$", "", raw.strip())
+            return json.loads(raw)
+        except requests.exceptions.HTTPError as e:
+            if resp.status_code in (429, 503) and attempt < retries - 1:
+                wait = (attempt + 1) * 10  # 10s → 20s → 30s
+                time.sleep(wait)
+                continue
+            return {"error": str(e)}
+        except json.JSONDecodeError as e:
+            return {"error": f"JSON parse error: {e}"}
+        except Exception as e:
+            return {"error": str(e)}
+    return {"error": "Gemini retry หมดแล้ว"}
 
 
 def analysis_to_notion_dicts(a, job_url):
