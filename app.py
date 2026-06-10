@@ -711,19 +711,17 @@ def fetch_jd(url):
 
     return None, " | ".join(errors)
 
-
-def analyze_with_llm(jd_text, retries=2):
-    prompt = ANALYSIS_PROMPT.format(profile=CANDIDATE_PROFILE, jd_text=jd_text[:5000])
+def _call_llm_raw(prompt, retries=2):
+    """Low-level LLM call — returns raw text string or raises RuntimeError"""
 
     # ── OpenRouter ──────────────────────────────────────────
     if OPENROUTER_API_KEY:
-        # เรียง model จากดี → สำรอง; openrouter/auto = ให้ OpenRouter เลือก free model เองค่ะ
         models = [
-            "openai/gpt-oss-120b:free",                  # OpenAI MoE 120B — แรงสุด
-            "nvidia/nemotron-3-super-120b-a12b:free",    # NVIDIA 120B MoE — 1M context
-            "google/gemma-4-31b-it:free",                # Google Gemma 4 31B
-            "nvidia/nemotron-3-nano-30b-a3b:free",       # NVIDIA 30B — fallback
-            "openai/gpt-oss-20b:free",                   # OpenAI 20B — fallback เบาสุด
+            "openai/gpt-oss-120b:free",
+            "nvidia/nemotron-3-super-120b-a12b:free",
+            "google/gemma-4-31b-it:free",
+            "nvidia/nemotron-3-nano-30b-a3b:free",
+            "openai/gpt-oss-20b:free",
         ]
         last_err = ""
         for model in models:
@@ -742,24 +740,17 @@ def analyze_with_llm(jd_text, retries=2):
                             "max_tokens": 4096,
                             "temperature": 0.3,
                         },
-                        timeout=60
+                        timeout=60,
                     )
                     resp.raise_for_status()
-                    raw = resp.json()["choices"][0]["message"]["content"]
-                    raw = re.sub(r"^```json\s*", "", raw.strip())
-                    raw = re.sub(r"```\s*$", "", raw.strip())
-                    return _parse_llm_json(raw)
+                    return resp.json()["choices"][0]["message"]["content"]
                 except requests.exceptions.HTTPError as e:
                     status = resp.status_code if resp is not None else 0
                     last_err = f"{model} HTTP {status}"
                     if status == 402:
-                        # Payment required — model นี้ไม่ฟรี ข้ามไปทันทีค่ะ
                         break
-                    if status == 429 and attempt < retries - 1:
-                        time.sleep(15)
-                        continue
-                    if status in (503, 529) and attempt < retries - 1:
-                        time.sleep(5)
+                    if status in (429, 503, 529) and attempt < retries - 1:
+                        time.sleep(15 if status == 429 else 5)
                         continue
                     break
                 except requests.exceptions.Timeout:
@@ -768,30 +759,30 @@ def analyze_with_llm(jd_text, retries=2):
                 except Exception as e:
                     last_err = f"{model}: {e}"
                     break
-        # OpenRouter ล้มทุก model — ลอง Gemini ต่อถ้ามี key ค่ะ
         if not GEMINI_API_KEY:
-            return {"error": f"OpenRouter ล้มเหลวทุก model — {last_err} (ลอง refresh หรือรอสักครู่แล้วลองใหม่นะคะ)"}
+            raise RuntimeError(f"OpenRouter ล้มเหลวทุก model — {last_err}")
 
-    # ── fallback: Gemini direct ─────────────────────────────
+    # ── Gemini fallback ─────────────────────────────────────
     if not GEMINI_API_KEY:
-        return {"error": "ไม่มี OPENROUTER_API_KEY หรือ GEMINI_API_KEY ใน secrets"}
+        raise RuntimeError("ไม่มี OPENROUTER_API_KEY หรือ GEMINI_API_KEY ใน secrets")
 
-    url = ("https://generativelanguage.googleapis.com/v1beta/models/"
-           "gemini-2.0-flash-lite:generateContent?key=" + GEMINI_API_KEY)
-
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        "gemini-2.0-flash-lite:generateContent?key=" + GEMINI_API_KEY
+    )
     for attempt in range(retries):
         resp = None
         try:
-            resp = requests.post(url, json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.3, "maxOutputTokens": 8192}
-            }, timeout=90)
+            resp = requests.post(
+                url,
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 0.3, "maxOutputTokens": 8192},
+                },
+                timeout=90,
+            )
             resp.raise_for_status()
-            raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-            raw = re.sub(r"^```json\s*", "", raw.strip())
-            raw = re.sub(r"```\s*$", "", raw.strip())
-            return _parse_llm_json(raw)
-
+            return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
         except requests.exceptions.HTTPError as e:
             error_body = {}
             try:
@@ -800,26 +791,179 @@ def analyze_with_llm(jd_text, retries=2):
                 pass
             error_msg    = error_body.get("error", {}).get("message", str(e))
             error_status = error_body.get("error", {}).get("status", "")
-
             if resp is not None and resp.status_code == 429:
                 if error_status == "RESOURCE_EXHAUSTED" or "quota" in error_msg.lower():
                     retry_match = re.search(r"retry in ([\d.]+)s", error_msg)
                     if retry_match and attempt < retries - 1:
                         time.sleep(float(retry_match.group(1)) + 5)
                         continue
-                    return {"error": "Gemini quota หมดแล้ว — รอถึงพรุ่งนี้หรือเพิ่ม billing"}
+                    raise RuntimeError("Gemini quota หมดแล้ว — รอถึงพรุ่งนี้หรือเพิ่ม billing")
                 if attempt < retries - 1:
                     time.sleep((attempt + 1) * 30)
                     continue
             elif resp is not None and resp.status_code == 503 and attempt < retries - 1:
                 time.sleep((attempt + 1) * 10)
                 continue
-            return {"error": f"{str(e)} | {error_msg}"}
-
+            raise RuntimeError(f"{str(e)} | {error_msg}")
+        except RuntimeError:
+            raise
         except Exception as e:
-            return {"error": str(e)}
+            raise RuntimeError(str(e))
+    raise RuntimeError("LLM retry หมดแล้ว")
 
-    return {"error": "LLM retry หมดแล้ว"}
+# Prompt สำหรับ Call 1 — extract facts จาก JD เท่านั้น ไม่ต้องรู้จัก candidate
+JD_EXTRACT_PROMPT = """
+Extract structured information from this job description. Reply ONLY with JSON, no markdown backticks.
+
+JD:
+{jd_text}
+
+Return this exact JSON structure (use null for unknown fields):
+{{
+  "job_title": "",
+  "company_name": "",
+  "work_location": "",
+  "wfh_policy": "WFH Available/Hybrid/On-site/Unknown",
+  "salary_min": null,
+  "salary_max": null,
+  "min_experience_years": null,
+  "fresh_grad_welcome": null,
+  "key_tech_stack": "",
+  "core_responsibilities": ["max 5 bullet points"],
+  "must_have_skills": ["hard requirements only"],
+  "nice_to_have_skills": ["explicitly stated as nice-to-have"],
+  "company_size": "",
+  "industry": "",
+  "apply_url": "",
+  "website": ""
+}}
+"""
+
+# Prompt สำหรับ Call 2 — วิเคราะห์ fit กับ candidate โดยใช้ extracted data
+FIT_ANALYSIS_PROMPT = """
+คุณคือ career advisor อาวุโสที่รู้จัก Thapanee (ทับทิม) ดีมาก
+วิเคราะห์ job ด้านล่างให้เธออย่างตรงไปตรงมา เหมือนเพื่อนที่ทำงาน HR มาบอก
+
+══ CANDIDATE PROFILE ══
+{profile}
+
+══ JOB DATA (extracted จาก JD แล้ว) ══
+{job_data_json}
+
+══ วิธีคิดก่อน output ══
+คิดผ่าน 4 ข้อนี้ในใจก่อน (ไม่ต้องเขียนออกมา):
+1. บริษัทนี้ทำ AI จริงหรือ AI washing?
+2. งานนี้ให้ ownership จริงหรือเปล่า?
+3. culture fit กับทับทิมไหม?
+4. resume version ไหนเหมาะ?
+
+══ SCORING GUIDE ══
+fit_level:
+  high        = skill match ≥70% + culture fit + ไม่มี dealbreaker
+  medium-high = skill match ≥60% + culture fit หรือ skill match ≥70% แต่ culture มีข้อกังวล
+  medium      = skill match ≥50% หรือ culture fit แต่มีช่องว่างพอสมควร
+  low-medium  = skill match <50% หรือมี dealbreaker 1 ข้อ
+  low         = มี dealbreaker หลายข้อ หรือ mismatch ชัดเจน
+
+ai_depth_score (1-5):
+  5 = AI เป็น core product, ต้องทำ model/agent/production AI จริง
+  4 = AI สำคัญมาก มี engineering depth
+  3 = AI ใช้อยู่แต่ไม่ใช่ core
+  2 = AI แค่ tool ประกอบ
+  1 = แทบไม่มี AI / AI washing
+
+ownership_score (1-5):
+  5 = design + build + ship เอง, end-to-end ownership
+  4 = มี ownership สูง มีอิสระในการตัดสินใจ
+  3 = ปานกลาง มี spec แต่ยืดหยุ่นได้
+  2 = ส่วนใหญ่ implement ตาม spec
+  1 = pure execution, ไม่มี creative input
+
+apply_decision:
+  APPLY     = fit_level high/medium-high + ไม่มี dealbreaker + ai_depth≥3 + ownership≥3
+  WATCHLIST = fit_level medium + มีข้อดีชัดเจน
+  PASS      = มี dealbreaker ชัด หรือ fit_level low/low-medium
+
+══ OUTPUT FORMAT ══
+ตอบกลับเป็น JSON เท่านั้น ห้ามมี markdown backticks:
+
+{{
+  "role_tier": "Tier1/2/3 — เหตุผล 1 ประโยค",
+  "fit_level": "high/medium-high/medium/low-medium/low",
+  "my_skill_match_pct": 75,
+  "ai_depth_score": 3,
+  "ownership_score": 3,
+  "gap_skills": ["skill ที่ขาดจริงๆ"],
+  "resume_version": "VERSION A/B/RHENUS/THINKNET/ACCENTURE/FLOWACCOUNT",
+  "resume_reason": "เหตุผล 1-2 ประโยค",
+  "apply_decision": "APPLY/WATCHLIST/PASS",
+  "company_tier": "Level1/2/3 — เหตุผลสั้นๆ",
+  "location": "Bangkok, Thailand",
+  "gaps": "gap หลัก max 80 chars",
+  "notes": "สิ่งที่ต้องรู้ก่อน apply max 100 chars",
+  "narrative_analysis": "วิเคราะห์ละเอียดภาษาไทย ครอบคลุม: [1] บริษัทเป็นใคร ทำอะไร น่าเชื่อถือแค่ไหน [2] AI ที่บริษัทนี้ทำ — จริงหรือ washing? [3] งานนี้ให้ ownership และ creative input แค่ไหน [4] culture fit กับทับทิม [5] เงินและสวัสดิการ [6] green flags และ red flags [7] สรุปพร้อมเหตุผลตรงๆ",
+  "interview_prep": {{
+    "behavioral_questions": [
+      {{"question": "คำถาม behavioral", "answer_guide": "แนวตอบดึง project ของทับทิม"}}
+    ],
+    "technical_questions": [
+      {{"question": "คำถาม technical ตาม stack ของ JD", "answer_guide": "แนวตอบพร้อมตัวอย่างจาก project จริง"}}
+    ],
+    "questions_to_ask": ["คำถามถามกลับ employer"],
+    "salary_negotiation_script": "script ต่อรองเงินภาษาไทย"
+  }},
+  "application_guide": {{
+    "how_to_apply": "วิธี apply และ channel ที่ดีที่สุด",
+    "form_questions_to_prepare": ["คำถามใน screening ที่น่าจะเจอ"],
+    "things_to_prepare": ["สิ่งที่ต้องเตรียมก่อน apply"]
+  }}
+}}
+"""
+
+
+def analyze_with_llm(jd_text, retries=2):
+    # ── Call 1: Extract job facts จาก JD (~2000 tokens) ────
+    extract_prompt = JD_EXTRACT_PROMPT.format(jd_text=jd_text[:4000])
+    try:
+        raw1 = _call_llm_raw(extract_prompt, retries=retries)
+        raw1 = re.sub(r"^```json\s*", "", raw1.strip())
+        raw1 = re.sub(r"```\s*$", "", raw1.strip())
+        job_facts = json.loads(raw1)
+    except json.JSONDecodeError:
+        # ถ้า parse ไม่ได้ ใช้ JD raw แทน
+        job_facts = {"raw_jd": jd_text[:2000]}
+    except RuntimeError as e:
+        return {"error": str(e), "job_title": "Unknown", "company_name": "Unknown"}
+
+    # ── Call 2: วิเคราะห์ fit (~3500 tokens) ───────────────
+    fit_prompt = FIT_ANALYSIS_PROMPT.format(
+        profile=CANDIDATE_PROFILE,
+        job_data_json=json.dumps(job_facts, ensure_ascii=False, indent=2),
+    )
+    try:
+        raw2 = _call_llm_raw(fit_prompt, retries=retries)
+        raw2 = re.sub(r"^```json\s*", "", raw2.strip())
+        raw2 = re.sub(r"```\s*$", "", raw2.strip())
+        fit_data = _parse_llm_json(raw2)
+    except RuntimeError as e:
+        return {"error": str(e), "job_title": "Unknown", "company_name": "Unknown"}
+
+    # ── Merge: job_facts + fit_data = result เดิม ──────────
+    result = {**job_facts, **fit_data}
+
+    # normalize keys ให้ตรงกับ analysis_to_notion_dicts ที่ใช้อยู่
+    result.setdefault("job_title",    job_facts.get("job_title", "Unknown"))
+    result.setdefault("company_name", job_facts.get("company_name", "Unknown"))
+    result.setdefault("work_location",job_facts.get("work_location", ""))
+    result.setdefault("wfh_policy",   job_facts.get("wfh_policy", "Unknown"))
+    result.setdefault("salary_min",   job_facts.get("salary_min"))
+    result.setdefault("salary_max",   job_facts.get("salary_max"))
+    result.setdefault("key_tech_stack", job_facts.get("key_tech_stack", ""))
+    result.setdefault("industry",     job_facts.get("industry", ""))
+    result.setdefault("website",      job_facts.get("website", ""))
+    result.setdefault("apply_url",    job_facts.get("apply_url", ""))
+
+    return result
 
 
 def _parse_llm_json(raw):
