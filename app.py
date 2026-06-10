@@ -556,25 +556,23 @@ def analyze_with_gemini(jd_text, retries=3):
     prompt = ANALYSIS_PROMPT.format(profile=CANDIDATE_PROFILE, jd_text=jd_text[:5000])
 
     for attempt in range(retries):
+        resp = None
         try:
             resp = requests.post(url, json={
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {
                     "temperature": 0.3,
-                    "maxOutputTokens": 8192  # ✅ เพิ่มจาก 4096 → 8192
+                    "maxOutputTokens": 8192
                 }
-            }, timeout=90)  # ✅ เพิ่ม timeout ด้วย
+            }, timeout=90)
             resp.raise_for_status()
             raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
             raw = re.sub(r"^```json\s*", "", raw.strip())
             raw = re.sub(r"```\s*$", "", raw.strip())
 
-            # ✅ fallback: ถ้า JSON ถูกตัด ให้ลอง repair ก่อน error
             try:
                 return json.loads(raw)
             except json.JSONDecodeError:
-                # ตัด JSON ที่ไม่สมบูรณ์แล้วปิด brace ให้
-                # หา } สุดท้ายที่ valid แล้วปิดให้ครบ
                 last_brace = raw.rfind("}")
                 if last_brace != -1:
                     repaired = raw[:last_brace + 1]
@@ -582,41 +580,56 @@ def analyze_with_gemini(jd_text, retries=3):
                         return json.loads(repaired)
                     except json.JSONDecodeError:
                         pass
-                # ถ้า repair ไม่ได้เลย ดึงเฉพาะ fields สำคัญด้วย regex แทน
                 def extract(field, default=""):
                     m = re.search(rf'"{field}"\s*:\s*"([^"]*)"', raw)
                     return m.group(1) if m else default
                 return {
-                    "job_title":    extract("job_title", "Unknown"),
-                    "company_name": extract("company_name", "Unknown"),
-                    "fit_level":    extract("fit_level", "medium"),
+                    "job_title":      extract("job_title", "Unknown"),
+                    "company_name":   extract("company_name", "Unknown"),
+                    "fit_level":      extract("fit_level", "medium"),
                     "apply_decision": extract("apply_decision", "WATCHLIST"),
-                    "role_tier":    extract("role_tier", ""),
-                    "work_location": extract("work_location", ""),
+                    "role_tier":      extract("role_tier", ""),
+                    "work_location":  extract("work_location", ""),
                     "key_tech_stack": extract("key_tech_stack", ""),
-                    "gaps":         extract("gaps", ""),
-                    "notes":        extract("notes", ""),
-                    "wfh_policy":   extract("wfh_policy", "Unknown"),
-                    "company_size": extract("company_size", ""),
-                    "company_tier": extract("company_tier", ""),
-                    "industry":     extract("industry", ""),
+                    "gaps":           extract("gaps", ""),
+                    "notes":          extract("notes", ""),
+                    "wfh_policy":     extract("wfh_policy", "Unknown"),
+                    "company_size":   extract("company_size", ""),
+                    "company_tier":   extract("company_tier", ""),
+                    "industry":       extract("industry", ""),
                     "error": "JSON truncated — partial data recovered"
                 }
 
         except requests.exceptions.HTTPError as e:
-            if resp.status_code == 429 and attempt < retries - 1:
-                wait = (attempt + 1) * 30  # 429: 30s → 60s → 90s (นานกว่าเดิม)
+            error_body = {}
+            try:
+                error_body = resp.json()
+            except Exception:
+                pass
+            error_msg    = error_body.get("error", {}).get("message", str(e))
+            error_status = error_body.get("error", {}).get("status", "")
+
+            if resp is not None and resp.status_code == 429:
+                # quota หมดวัน — ไม่มีประโยชน์ retry
+                if error_status == "RESOURCE_EXHAUSTED" or "quota" in error_msg.lower():
+                    return {"error": f"Gemini quota หมดแล้ว — รอถึงพรุ่งนี้หรือเพิ่ม billing: {error_msg}"}
+                # rate limit ชั่วคราว → retry
+                if attempt < retries - 1:
+                    wait = (attempt + 1) * 30  # 30s → 60s → 90s
+                    time.sleep(wait)
+                    continue
+
+            elif resp is not None and resp.status_code == 503 and attempt < retries - 1:
+                wait = (attempt + 1) * 10  # 10s → 20s → 30s
                 time.sleep(wait)
                 continue
-            elif resp.status_code == 503 and attempt < retries - 1:
-                wait = (attempt + 1) * 10  # 503: 10s → 20s → 30s
-                time.sleep(wait)
-                continue
-            return {"error": str(e)}
+
+            return {"error": f"{str(e)} | {error_msg}"}
+
         except Exception as e:
             return {"error": str(e)}
-    return {"error": "Gemini retry หมดแล้ว"}
 
+    return {"error": "Gemini retry หมดแล้ว"}
 
 def analysis_to_notion_dicts(a, job_url):
     """แปลง Gemini output → job_data + company_data ที่ส่งให้ submit_to_notion ได้เลย"""
