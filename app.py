@@ -1,6 +1,10 @@
 import streamlit as st
 import requests
+import re
+import json
+import time
 from difflib import get_close_matches
+from bs4 import BeautifulSoup
 
 # ── page config ──────────────────────────────────────────
 st.set_page_config(
@@ -53,6 +57,7 @@ st.markdown("""
 NOTION_TOKEN       = st.secrets["NOTION_TOKEN"]
 JOB_PIPELINE_DB_ID = st.secrets["JOB_PIPELINE_DB_ID"]
 COMPANIES_DB_ID    = st.secrets["COMPANIES_DB_ID"]
+GEMINI_API_KEY     = st.secrets.get("GEMINI_API_KEY", "")
 
 HEADERS = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
@@ -319,7 +324,7 @@ def submit_to_notion(job_data, company_data):
 
 
 # ── Tabs Navigation ──────────────────────────────────────
-tab1, tab2 = st.tabs(["📝 Paste Python Dict (Fast)", "✍️ Manual Form"])
+tab1, tab2, tab3 = st.tabs(["📝 Paste Python Dict (Fast)", "✍️ Manual Form", "🤖 Batch Analyze"])
 
 # --- TAB 1: สำหรับวางโค้ด ---
 with tab1:
@@ -419,3 +424,314 @@ with tab2:
             "notes": company_notes,
         }
         submit_to_notion(j_data, c_data)
+
+
+# ── TAB 3: Batch Analyze ─────────────────────────────────
+CANDIDATE_PROFILE = """
+WHO I AM — THAPANEE CHAIPRAPHA
+Fresh grad (May 2026), Thammasat University — Software Engineering (CS)
+งานแรก — เปิดรับกว้าง แต่ prefer AI/Tech roles
+
+Hard Skills
+Proficient: Python, JavaScript, Java, React.js, FastAPI, Node.js, SQL, MongoDB, Git, Figma,
+LLM API (Gemini, OpenAI-compatible), Prompt Engineering, Vision Transformers (ViT-B/16),
+Deep Learning, Grad-CAM (Explainable AI)
+Familiar: Next.js, TypeScript, Tailwind CSS, Docker, Power BI, Excel VBA
+
+Key Projects
+- dCDT — Solo medical AI screening: 96.14% accuracy | FastAPI + Next.js + ViT-B/16 + Grad-CAM
+- MyGPT — Full-stack LLM web app | React + Node.js + Gemini API + JWT + Vercel
+- Keeppook — Android finance tracker | Java + Gemini API + caching layer
+- Freelance UX/UI: 6 projects, 5-star, Fastwork
+
+Salary: 35K–45K THB (floor 30K) | WFH/Hybrid preferred
+งานที่ใช่: build AI ที่คนใช้จริง, ownership สูง, ทีมเล็ก, ไม่ bureaucratic
+Dealbreakers: เงิน <30K, Pure QA, implement ตาม spec อย่างเดียว, บริษัทไม่มั่นคง
+"""
+
+ANALYSIS_PROMPT = """
+คุณคือ career advisor วิเคราะห์ JD นี้สำหรับผู้สมัคร:
+{profile}
+
+JD:
+{jd_text}
+
+ตอบกลับเป็น JSON เท่านั้น ห้ามมี markdown backticks หรือข้อความอื่นนอกจาก JSON:
+
+{{
+  "job_title": "ชื่อตำแหน่ง",
+  "company_name": "ชื่อบริษัท",
+  "role_tier": "Tier1/2/3 - เหตุผลสั้นๆ",
+  "fit_level": "high/medium-high/medium/low-medium/low",
+  "work_location": "เมือง/ย่าน",
+  "wfh_policy": "WFH Available/Hybrid/On-site/Unknown",
+  "key_tech_stack": "max 6 items คั่นด้วยคอมมา",
+  "salary_min": 0,
+  "salary_max": 0,
+  "min_experience_years": 0,
+  "fresh_grad_welcome": true,
+  "ai_depth_score": 3,
+  "ownership_score": 3,
+  "my_skill_match_pct": 75,
+  "gap_skills": ["skill ที่ขาด"],
+  "resume_version": "VERSION A/B/RHENUS/THINKNET/ACCENTURE",
+  "resume_reason": "เหตุผลสั้นๆ",
+  "apply_decision": "APPLY/WATCHLIST/PASS",
+  "company_size": "startup/sme/enterprise",
+  "company_tier": "Level1/2/3 - เหตุผล",
+  "industry": "อุตสาหกรรม",
+  "location": "Bangkok, Thailand",
+  "website": "",
+  "gaps": "gap หลักสั้นๆ max 80 chars",
+  "notes": "note สำคัญ max 100 chars",
+  "narrative_analysis": "วิเคราะห์ละเอียดภาษาไทย: บริษัทเป็นยังไง / เงิน-สวัสดิการ / AI จริงหรือ AI washing / เติบโตได้ไหม / red flags / green flags / สรุป APPLY-WATCHLIST-PASS",
+  "interview_prep": {{
+    "behavioral_questions": [{{"question": "?", "answer_guide": "?"}}],
+    "technical_questions":  [{{"question": "?", "answer_guide": "?"}}],
+    "questions_to_ask": ["คำถามถามกลับ employer"],
+    "salary_negotiation_script": "script ต่อรองเงินภาษาไทย"
+  }},
+  "application_guide": {{
+    "how_to_apply": "วิธี apply",
+    "form_questions_to_prepare": ["คำถามในฟอร์มที่น่าจะเจอ"],
+    "things_to_prepare": ["สิ่งที่ต้องเตรียม"]
+  }}
+}}
+ถ้า JD ดึงไม่ได้ให้ตอบ: {{"error": "ไม่สามารถดึง JD ได้", "job_title": "Unknown", "company_name": "Unknown"}}
+"""
+
+
+def fetch_jd(url):
+    hdrs = {
+        "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/124.0.0.0 Safari/537.36"),
+        "Accept-Language": "th-TH,th;q=0.9,en;q=0.8",
+    }
+    if "facebook.com" in url:
+        return f"[Facebook — กรุณา copy JD มาวางเอง]\nURL: {url}"
+    if "linkedin.com" in url:
+        return f"[LinkedIn — กรุณา copy JD มาวางเอง]\nURL: {url}"
+    try:
+        resp = requests.get(url, headers=hdrs, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for tag in soup(["script", "style", "nav", "header", "footer", "iframe"]):
+            tag.decompose()
+        if "jobsdb.com" in url:
+            section = soup.find("div", {"data-automation": "jobAdDetails"})
+            if section:
+                return section.get_text(separator="\n", strip=True)[:6000]
+        if "jobthai.com" in url:
+            section = soup.find("div", class_=re.compile("job-detail|detail-content", re.I))
+            if section:
+                return section.get_text(separator="\n", strip=True)[:6000]
+        main = soup.find("main") or soup.find("article") or soup.body
+        if main:
+            text = main.get_text(separator="\n", strip=True)
+            return re.sub(r"\n{3,}", "\n\n", text)[:6000]
+    except Exception as e:
+        return f"[Fetch error: {e}]\nURL: {url}"
+    return "[ไม่สามารถดึง content ได้]"
+
+
+def analyze_with_gemini(jd_text):
+    if not GEMINI_API_KEY:
+        return {"error": "ไม่มี GEMINI_API_KEY ใน secrets"}
+    url = ("https://generativelanguage.googleapis.com/v1beta/models/"
+           "gemini-2.5-flash:generateContent?key=" + GEMINI_API_KEY)
+    prompt = ANALYSIS_PROMPT.format(profile=CANDIDATE_PROFILE, jd_text=jd_text[:5000])
+    try:
+        resp = requests.post(url, json={
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 4096}
+        }, timeout=60)
+        resp.raise_for_status()
+        raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        raw = re.sub(r"^```json\s*", "", raw.strip())
+        raw = re.sub(r"```\s*$", "", raw.strip())
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        return {"error": f"JSON parse error: {e}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def analysis_to_notion_dicts(a, job_url):
+    """แปลง Gemini output → job_data + company_data ที่ส่งให้ submit_to_notion ได้เลย"""
+    ip = a.get("interview_prep", {})
+    ag = a.get("application_guide", {})
+    parts = [a.get("narrative_analysis", "")]
+    if ip:
+        parts.append("\n--- INTERVIEW PREP ---")
+        for q in ip.get("behavioral_questions", []):
+            parts.append(f"[Behavioral] {q.get('question','')}\n  → {q.get('answer_guide','')}")
+        for q in ip.get("technical_questions", []):
+            parts.append(f"[Technical] {q.get('question','')}\n  → {q.get('answer_guide','')}")
+        if ip.get("questions_to_ask"):
+            parts.append("ถามกลับ:\n" + "\n".join(f"  • {q}" for q in ip["questions_to_ask"]))
+        if ip.get("salary_negotiation_script"):
+            parts.append(f"\n💰 Salary Script:\n{ip['salary_negotiation_script']}")
+    if ag:
+        parts.append("\n--- APPLICATION GUIDE ---")
+        if ag.get("how_to_apply"):
+            parts.append(f"How to apply: {ag['how_to_apply']}")
+        if ag.get("things_to_prepare"):
+            parts.append("เตรียม:\n" + "\n".join(f"  • {x}" for x in ag["things_to_prepare"]))
+    if a.get("resume_version"):
+        parts.append(f"\n--- RESUME ---\nใช้: {a['resume_version']}\nเหตุผล: {a.get('resume_reason','')}")
+
+    job_data = {
+        "job_title":      a.get("job_title", "Unknown"),
+        "role_tier":      a.get("role_tier", ""),
+        "fit_level":      a.get("fit_level", "medium"),
+        "apply_status":   "To Apply",
+        "work_location":  a.get("work_location", ""),
+        "salary_min":     a.get("salary_min") or None,
+        "salary_max":     a.get("salary_max") or None,
+        "linkedin_url":   job_url if "linkedin.com" in job_url else "",
+        "key_tech_stack": a.get("key_tech_stack", ""),
+        "gaps":           a.get("gaps", ""),
+        "notes":          a.get("notes", ""),
+        "analysis":       "\n\n".join(parts),
+    }
+    company_data = {
+        "company_name": a.get("company_name", "Unknown"),
+        "company_size": a.get("company_size", ""),
+        "company_tier": a.get("company_tier", ""),
+        "industry":     a.get("industry", ""),
+        "location":     a.get("location", ""),
+        "wfh_policy":   a.get("wfh_policy", "Unknown"),
+        "website":      a.get("website", ""),
+        "notes":        "",
+    }
+    return job_data, company_data
+
+
+with tab3:
+    st.markdown("อัปโหลด CSV รายการ URL งาน → ระบบ fetch JD → วิเคราะห์ด้วย Gemini → push Notion ทีละงานค่ะ")
+
+    if not GEMINI_API_KEY:
+        st.warning("⚠️ ยังไม่มี `GEMINI_API_KEY` ใน Streamlit Secrets — ไปเพิ่มที่ Settings → Secrets ก่อนนะคะ")
+
+    uploaded    = st.file_uploader("อัปโหลด Job_Listings.csv", type="csv")
+    delay       = st.slider("หน่วงเวลาระหว่าง request (วินาที)", 3, 15, 5,
+                            help="เพิ่มถ้าเจอ rate limit จาก Gemini")
+    push_notion = st.checkbox("Push เข้า Notion อัตโนมัติ", value=True)
+
+    if uploaded and st.button("🚀 Start Batch Analyze", key="btn_batch"):
+        import csv, io
+
+        content = uploaded.read().decode("utf-8-sig")
+        reader  = csv.DictReader(io.StringIO(content))
+        jobs, seen, dupes = [], set(), 0
+        for row in reader:
+            url = (row.get("URL") or "").strip()
+            if not url:
+                continue
+            base = url.split("?")[0].rstrip("/")
+            if base in seen:
+                dupes += 1
+                continue
+            seen.add(base)
+            jobs.append({"url": url, "name": (row.get("Name") or "").strip(), "base": base})
+
+        st.info(f"พบ **{len(jobs)}** unique jobs ({dupes} duplicates ถูกตัดออก)")
+
+        stats    = {"ok": 0, "err": 0, "notion_ok": 0, "notion_err": 0}
+        results  = []
+        progress = st.progress(0, text="เริ่มต้น...")
+        log_area = st.empty()
+        logs     = []
+
+        def add_log(msg):
+            logs.append(msg)
+            log_area.code("\n".join(logs[-30:]))
+
+        for i, job in enumerate(jobs):
+            url  = job["url"]
+            name = job["name"] or url[:50]
+            progress.progress(i / len(jobs), text=f"[{i+1}/{len(jobs)}] {name[:40]}...")
+
+            add_log(f"\n[{i+1}/{len(jobs)}] {name[:55]}")
+            add_log(f"  🌐 Fetching JD...")
+            jd = fetch_jd(url)
+            add_log(f"  📄 {jd[:80].replace(chr(10),' ')}...")
+
+            add_log(f"  🤖 Analyzing with Gemini...")
+            analysis = analyze_with_gemini(jd)
+
+            if "error" in analysis and "job_title" not in analysis:
+                add_log(f"  ❌ {analysis['error']}")
+                stats["err"] += 1
+                results.append({"url": url, "name": name, "status": "error", "error": analysis["error"]})
+            else:
+                add_log(f"  ✅ {analysis.get('job_title','?')} @ {analysis.get('company_name','?')} "
+                        f"| {analysis.get('fit_level','?')} | {analysis.get('apply_decision','?')}")
+                stats["ok"] += 1
+                result_entry = {"url": url, "name": name, "status": "ok", "analysis": analysis}
+
+                if push_notion:
+                    add_log(f"  📤 Pushing to Notion...")
+                    try:
+                        j_data, c_data = analysis_to_notion_dicts(analysis, url)
+                        if not j_data.get("job_title", "").strip():
+                            raise ValueError("no job title")
+                        if not c_data.get("company_name", "").strip():
+                            raise ValueError("no company name")
+                        company_id, found = search_company(c_data["company_name"])
+                        if not found or not company_id:
+                            company_id, err = create_company(c_data, opt)
+                            if err:
+                                raise ValueError(f"create company: {err}")
+                        ok_job, err_job = create_job(j_data, company_id, opt)
+                        if not ok_job:
+                            raise ValueError(f"create job: {err_job}")
+                        add_log(f"  ✅ Notion OK")
+                        stats["notion_ok"] += 1
+                    except Exception as e:
+                        add_log(f"  ❌ Notion error: {e}")
+                        stats["notion_err"] += 1
+
+                results.append(result_entry)
+
+            if i < len(jobs) - 1:
+                time.sleep(delay)
+
+        # rerank ตอนจบ
+        if push_notion and stats["notion_ok"] > 0:
+            add_log("\n📊 Reranking all jobs...")
+            try:
+                rerank_all_jobs(opt, add_log)
+                add_log("✅ Rerank done!")
+            except Exception as e:
+                add_log(f"❌ Rerank error: {e}")
+
+        progress.progress(1.0, text="เสร็จแล้ว! ✨")
+        st.success(f"เสร็จแล้ว! ✅ {stats['ok']} analyzed | 📤 {stats['notion_ok']} pushed | ❌ {stats['err']} errors")
+
+        # quick insights
+        all_a = [r["analysis"] for r in results if r.get("status") == "ok"]
+        if all_a:
+            col_a, col_b, col_c = st.columns(3)
+            col_a.metric("APPLY",     sum(1 for a in all_a if a.get("apply_decision") == "APPLY"))
+            col_b.metric("WATCHLIST", sum(1 for a in all_a if a.get("apply_decision") == "WATCHLIST"))
+            col_c.metric("PASS",      sum(1 for a in all_a if a.get("apply_decision") == "PASS"))
+            fg = sum(1 for a in all_a if a.get("fresh_grad_welcome"))
+            st.caption(f"Fresh-grad friendly: {fg}/{len(all_a)} jobs")
+            all_gaps = [g for a in all_a for g in a.get("gap_skills", [])]
+            gc = {}
+            for g in all_gaps:
+                g = g.strip()
+                if g: gc[g] = gc.get(g, 0) + 1
+            top = sorted(gc.items(), key=lambda x: -x[1])[:5]
+            if top:
+                st.caption(f"Top skill gaps: {', '.join(f'{g}({n})' for g,n in top)}")
+
+        # download JSON
+        st.download_button(
+            "⬇️ Download jobs_analyzed.json",
+            data=json.dumps(results, ensure_ascii=False, indent=2),
+            file_name="jobs_analyzed.json",
+            mime="application/json"
+        )
