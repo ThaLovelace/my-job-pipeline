@@ -813,29 +813,33 @@ def _call_llm_raw(prompt, retries=2):
 
 # Prompt สำหรับ Call 1 — extract facts จาก JD เท่านั้น ไม่ต้องรู้จัก candidate
 JD_EXTRACT_PROMPT = """
-Extract structured information from this job description. Reply ONLY with JSON, no markdown backticks.
+Extract structured information from this job description. Reply ONLY with valid JSON, no markdown backticks, no extra text.
+
+IMPORTANT: You MUST fill in "job_title" and "company_name" from the JD text. Never leave them empty.
+- job_title: the exact position name from the JD (e.g. "Data Engineer", "AI Developer")
+- company_name: the hiring company name. If not stated, write "Not specified"
 
 JD:
 {jd_text}
 
-Return this exact JSON structure (use null for unknown fields):
+Return this exact JSON structure:
 {{
-  "job_title": "",
-  "company_name": "",
-  "work_location": "",
-  "wfh_policy": "WFH Available/Hybrid/On-site/Unknown",
-  "salary_min": null,
-  "salary_max": null,
-  "min_experience_years": null,
-  "fresh_grad_welcome": null,
-  "key_tech_stack": "",
-  "core_responsibilities": ["max 5 bullet points"],
-  "must_have_skills": ["hard requirements only"],
-  "nice_to_have_skills": ["explicitly stated as nice-to-have"],
-  "company_size": "",
-  "industry": "",
-  "apply_url": "",
-  "website": ""
+  "job_title": "<position name from JD — REQUIRED, never empty>",
+  "company_name": "<company name from JD — REQUIRED, use 'Not specified' if truly absent>",
+  "work_location": "<city or region, null if unknown>",
+  "wfh_policy": "<one of: WFH Available / Hybrid / On-site / Unknown>",
+  "salary_min": <number in THB or null>,
+  "salary_max": <number in THB or null>,
+  "min_experience_years": <number or null>,
+  "fresh_grad_welcome": <true/false/null>,
+  "key_tech_stack": "<comma-separated tech stack>",
+  "core_responsibilities": ["<up to 5 bullet points>"],
+  "must_have_skills": ["<hard requirements only>"],
+  "nice_to_have_skills": ["<explicitly stated as nice-to-have>"],
+  "company_size": "<e.g. 50-200 employees, or null>",
+  "industry": "<e.g. HR Tech, Fintech, null>",
+  "apply_url": "<application URL or null>",
+  "website": "<company website or null>"
 }}
 """
 
@@ -948,27 +952,26 @@ def analyze_with_llm(jd_text, retries=2):
     except RuntimeError as e:
         return {"error": str(e), "job_title": "Unknown", "company_name": "Unknown"}
 
-    # ── Merge: fit_data เป็น base, แต่ key สำคัญให้ job_facts ชนะเสมอ ──
-    CORE_KEYS = ("job_title", "company_name", "work_location", "wfh_policy",
-                 "salary_min", "salary_max", "key_tech_stack", "industry",
-                 "website", "apply_url")
-    result = {**fit_data, **job_facts}  # job_facts ชนะ fit_data
-    # ถ้า job_facts ให้ค่าว่าง/null ให้ fallback กลับไปใช้ fit_data
-    for key in CORE_KEYS:
-        if not result.get(key):
-            result[key] = fit_data.get(key) or job_facts.get(key) or ""
+    # ── Merge: รวม job_facts + fit_data โดย prefer ค่าที่ไม่ว่าง ──────────
+    result = {**job_facts, **fit_data}
 
-    # normalize keys ให้ตรงกับ analysis_to_notion_dicts ที่ใช้อยู่
-    result.setdefault("job_title",    job_facts.get("job_title", "Unknown"))
-    result.setdefault("company_name", job_facts.get("company_name", "Unknown"))
-    result.setdefault("work_location",job_facts.get("work_location", ""))
-    result.setdefault("wfh_policy",   job_facts.get("wfh_policy", "Unknown"))
-    result.setdefault("salary_min",   job_facts.get("salary_min"))
-    result.setdefault("salary_max",   job_facts.get("salary_max"))
-    result.setdefault("key_tech_stack", job_facts.get("key_tech_stack", ""))
-    result.setdefault("industry",     job_facts.get("industry", ""))
-    result.setdefault("website",      job_facts.get("website", ""))
-    result.setdefault("apply_url",    job_facts.get("apply_url", ""))
+    # สำหรับ key สำคัญ: ถ้าค่าปัจจุบันว่าง ("", None, []) ให้หยิบจากอีก dict มาแทน
+    CORE_KEYS = [
+        ("job_title",     "Unknown"),
+        ("company_name",  "Unknown"),
+        ("work_location", ""),
+        ("wfh_policy",    "Unknown"),
+        ("key_tech_stack",""),
+        ("industry",      ""),
+        ("website",       ""),
+        ("apply_url",     ""),
+        ("salary_min",    None),
+        ("salary_max",    None),
+    ]
+    for key, default in CORE_KEYS:
+        # ลอง job_facts ก่อน แล้ว fit_data ถ้ายังว่าง
+        val = job_facts.get(key) or fit_data.get(key) or default
+        result[key] = val
 
     return result
 
