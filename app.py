@@ -253,6 +253,75 @@ def _get_listing_status_options():
     return []
 
 @st.cache_data(ttl=300, show_spinner=False)
+def get_listing_property_map(_bust=0):
+    """
+    ดึงชื่อ property จริงจาก Job Listing DB และ map กับชื่อ canonical ที่โค้ดใช้
+    คืน dict เช่น:
+      { "status": "Status", "name": "Name", "url": "URL",
+        "company": "Company", "jd": "JD", "notes": "Notes",
+        "status_type": "select"  # หรือ "status" (Notion status type) }
+    """
+    if not JOB_LISTING_DB_ID:
+        return {}
+    try:
+        res = requests.get("https://api.notion.com/v1/databases/" + JOB_LISTING_DB_ID, headers=HEADERS)
+        props = res.json().get("properties", {})
+    except Exception:
+        return {}
+
+    result = {}
+
+    # helper: หาชื่อ property จริงจาก candidates (fuzzy)
+    def find_prop(candidates, types=None):
+        prop_names = list(props.keys())
+        for c in candidates:
+            # exact match ก่อน
+            if c in props:
+                p = props[c]
+                if types is None or p.get("type") in types:
+                    return c, p.get("type")
+            # fuzzy match
+            matched = fuzzy_match(c, prop_names, cutoff=0.7)
+            if matched and matched in props:
+                p = props[matched]
+                if types is None or p.get("type") in types:
+                    return matched, p.get("type")
+        return None, None
+
+    # Status (select หรือ status type)
+    name, ptype = find_prop(["Status", "status", "สถานะ"], types=["select", "status"])
+    if name:
+        result["status"] = name
+        result["status_type"] = ptype
+
+    # title field (Name ของ row)
+    name, _ = find_prop(["Name", "name", "ชื่อ", "Job", "Title"], types=["title"])
+    if name:
+        result["name"] = name
+
+    # URL
+    name, _ = find_prop(["URL", "url", "Link", "link", "ลิงก์"], types=["url"])
+    if name:
+        result["url"] = name
+
+    # Company
+    name, _ = find_prop(["Company", "company", "บริษัท"], types=["rich_text", "title"])
+    if name:
+        result["company"] = name
+
+    # JD
+    name, _ = find_prop(["JD", "jd", "Job Description", "Description", "รายละเอียด"], types=["rich_text"])
+    if name:
+        result["jd"] = name
+
+    # Notes
+    name, _ = find_prop(["Notes", "notes", "Note", "note", "หมายเหตุ", "Error", "error"], types=["rich_text"])
+    if name:
+        result["notes"] = name
+
+    return result
+
+@st.cache_data(ttl=300, show_spinner=False)
 def get_listing_status_map():
     """คืน dict mapping ชื่อ canonical → ชื่อจริงใน Notion (fuzzy)"""
     options = _get_listing_status_options()
@@ -268,107 +337,103 @@ def get_listing_status_map():
 def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_key="consider", error_note=""):
     """
     สร้างหรืออัปเดต row ใน Job Listing DB
-    - ถ้ายังไม่มี URL นี้ → สร้างใหม่
-    - ถ้ามีแล้ว → อัปเดตเฉพาะ field ที่ส่งมา
-    status_key: "consider" | "added" | "not_apply" | "fetch_error" | "llm_error"
-
-    Strategy: ลอง select ก่อน ถ้า Notion ตอบ validation_error (option ไม่มีใน DB)
-    จะ fallback เขียน status_name ลง Notes แทน เพื่อให้ row ออกจาก queue ได้เสมอ
-    (fetch_pending_listings กรองด้วย status field ว่าง — ถ้า Notes มีค่า status ไม่ออก queue
-     แต่ถ้า select set ไม่ได้ → row ยังวนกลับมา ดังนั้นต้องแน่ใจว่า select สำเร็จ)
+    ใช้ชื่อ property จริงจาก get_listing_property_map() — ไม่ hardcode ชื่อ field ใดๆ
     """
     if not JOB_LISTING_DB_ID:
         return None, "ไม่มี JOB_LISTING_DB_ID"
 
-    status_map = get_listing_status_map()
+    pmap = get_listing_property_map()
+    if not pmap:
+        return None, "ดึง property map จาก Notion ไม่ได้"
+
+    status_map  = get_listing_status_map()
     status_name = status_map.get(status_key, status_key)
 
-    # ค้นหา row เดิมด้วย URL
+    # ── ค้นหา row เดิมด้วย URL ──────────────────────────────
     existing_id = None
+    url_prop = pmap.get("url")
+    if url_prop:
+        try:
+            res = requests.post(
+                f"https://api.notion.com/v1/databases/{JOB_LISTING_DB_ID}/query",
+                headers=HEADERS,
+                json={"filter": {"property": url_prop, "url": {"equals": url}}}
+            )
+            rows = res.json().get("results", [])
+            if rows:
+                existing_id = rows[0]["id"]
+        except Exception:
+            pass
+
+    # ── สร้าง properties payload ด้วยชื่อ property จริง ─────
+    props = {}
+
+    # Status
+    status_prop = pmap.get("status")
+    status_type = pmap.get("status_type", "select")
+    if status_prop:
+        if status_type == "status":
+            props[status_prop] = {"status": {"name": status_name}}
+        else:
+            props[status_prop] = {"select": {"name": status_name}}
+
+    # Name / title
+    name_prop = pmap.get("name")
+    if name_prop and job_title:
+        props[name_prop] = {"title": [{"text": {"content": job_title[:200]}}]}
+
+    # URL
+    if url_prop and url:
+        props[url_prop] = {"url": url}
+
+    # Company
+    company_prop = pmap.get("company")
+    if company_prop and company_name:
+        props[company_prop] = {"rich_text": [{"text": {"content": company_name[:200]}}]}
+
+    # JD
+    jd_prop = pmap.get("jd")
+    if jd_prop and jd_raw:
+        props[jd_prop] = {"rich_text": [{"text": {"content": jd_raw[:2000]}}]}
+
+    # Notes (error + status label สำหรับ error states)
+    notes_prop = pmap.get("notes")
+    notes_parts = []
+    if status_key not in ("consider", "added", "not_apply"):
+        notes_parts.append(f"[{status_name}]")
+    if error_note:
+        notes_parts.append(error_note[:460])
+    if notes_prop and notes_parts:
+        props[notes_prop] = {"rich_text": [{"text": {"content": " — ".join(notes_parts)[:500]}}]}
+
+    if not props:
+        return None, f"ไม่มี property ที่ map ได้เลย — pmap={pmap}"
+
+    # ── ส่ง request ──────────────────────────────────────────
     try:
-        res = requests.post(
-            f"https://api.notion.com/v1/databases/{JOB_LISTING_DB_ID}/query",
-            headers=HEADERS,
-            json={"filter": {"property": "URL", "url": {"equals": url}}}
-        )
-        rows = res.json().get("results", [])
-        if rows:
-            existing_id = rows[0]["id"]
-    except Exception:
-        pass
-
-    def _build_props(use_select=True):
-        props = {}
-        if use_select:
-            props["Status"] = {"select": {"name": status_name}}
-        if job_title:
-            props["Name"] = {"title": [{"text": {"content": job_title[:200]}}]}
-        if company_name:
-            props["Company"] = {"rich_text": [{"text": {"content": company_name[:200]}}]}
-        if url:
-            props["URL"] = {"url": url}
-        if jd_raw:
-            props["JD"] = {"rich_text": [{"text": {"content": jd_raw[:2000]}}]}
-        # รวม error_note กับ status_key ไว้ใน Notes เสมอ — เผื่อ select ล้มเหลว ยังมีบันทึกไว้
-        notes_parts = []
-        if status_key not in ("consider", "added", "not_apply"):
-            notes_parts.append(f"[{status_name}]")
-        if error_note:
-            notes_parts.append(error_note[:480])
-        if notes_parts:
-            props["Notes"] = {"rich_text": [{"text": {"content": " — ".join(notes_parts)[:500]}}]}
-        return props
-
-    def _do_request(props):
         if existing_id:
-            return requests.patch(
+            res = requests.patch(
                 f"https://api.notion.com/v1/pages/{existing_id}",
                 headers=HEADERS,
                 json={"properties": props}
             )
         else:
-            if "Name" not in props:
-                props["Name"] = {"title": [{"text": {"content": (job_title or url)[:200]}}]}
-            return requests.post(
+            # สร้างใหม่ — ต้องมี title เสมอ
+            if name_prop and name_prop not in props:
+                props[name_prop] = {"title": [{"text": {"content": (job_title or url)[:200]}}]}
+            res = requests.post(
                 "https://api.notion.com/v1/pages",
                 headers=HEADERS,
                 json={"parent": {"database_id": JOB_LISTING_DB_ID}, "properties": props}
             )
 
-    try:
-        # ── รอบแรก: ลอง select ตามปกติ ──────────────────────
-        res = _do_request(_build_props(use_select=True))
         result = res.json()
         if "id" in result:
             return result["id"], None
 
-        notion_err = result.get("message", "unknown error")
-        notion_code = result.get("code", "")
-
-        # ── รอบสอง: ถ้า select option ไม่มีใน DB → fallback ──
-        # Notion คืน "Could not find option" หรือ validation_error
-        if "option" in notion_err.lower() or notion_code in ("validation_error", "invalid_request_url"):
-            props_no_select = _build_props(use_select=False)
-            # เขียน status ลง Notes แทน select เพื่อให้ row ออกจาก queue
-            existing_notes = props_no_select.get("Notes", {}).get("rich_text", [{}])[0].get("text", {}).get("content", "")
-            if f"[{status_name}]" not in existing_notes:
-                new_notes = f"[{status_name}] {existing_notes}".strip()[:500]
-                props_no_select["Notes"] = {"rich_text": [{"text": {"content": new_notes}}]}
-
-            # ⚠️ select ยังต้องเซตเพื่อออกจาก queue — ลอง option ที่รู้จักแน่ๆ แทน
-            # "Consider" น่าจะมีแน่นอนเพราะ row เดิมถูกสร้างมาจาก queue ที่มี status ว่าง
-            fallback_options = [o for o in _get_listing_status_options()
-                                if o.lower() not in ("", "no status", "no apply status")]
-            if fallback_options:
-                props_no_select["Status"] = {"select": {"name": fallback_options[-1]}}
-
-            res2 = _do_request(props_no_select)
-            result2 = res2.json()
-            if "id" in result2:
-                return result2["id"], f"select fallback used (original option '{status_name}' not in DB)"
-            return None, f"fallback also failed: {result2.get('message', 'unknown')} | original: {notion_err}"
-
-        return None, notion_err
+        # คืน error พร้อม context สำหรับ debug
+        notion_msg = result.get("message", "unknown error")
+        return None, f"{notion_msg} | pmap={pmap}"
 
     except Exception as e:
         return None, str(e)
@@ -1313,16 +1378,33 @@ with tab3:
         delay = st.slider("หน่วงเวลาระหว่าง request (วินาที)", 5, 30, 12,
                           help="แนะนำ 12+ วินาที เพื่อหลีกเลี่ยง Groq rate limit")
 
+    # ── Debug: แสดง property map จริงจาก Notion ─────────────
+    if JOB_LISTING_DB_ID:
+        with st.expander("🔍 Debug: Notion field map", expanded=False):
+            if st.button("รีเฟรช field map", key="btn_bust_pmap"):
+                get_listing_property_map.clear()
+                get_listing_status_map.clear()
+            pmap_debug = get_listing_property_map()
+            smap_debug = get_listing_status_map()
+            st.json({"property_map": pmap_debug, "status_map": smap_debug})
+
     st.markdown("---")
 
     # ══════════════════════════════════════════════════════════
     # SECTION A — ดึงจาก Job Listing DB (main flow)
     # ══════════════════════════════════════════════════════════
     def fetch_pending_listings():
-        """ดึง rows ใน Job Listing DB ที่ยังไม่มีสถานะ"""
+        """ดึง rows ใน Job Listing DB ที่ยังไม่มีสถานะ ใช้ชื่อ field จริงจาก pmap"""
         if not JOB_LISTING_DB_ID:
             return [], "ไม่มี JOB_LISTING_DB_ID"
         try:
+            pmap = get_listing_property_map()
+            status_field = pmap.get("status", "Status")
+            status_type  = pmap.get("status_type", "select")
+            url_field    = pmap.get("url", "URL")
+            name_field   = pmap.get("name", "Name")
+            jd_field     = pmap.get("jd", "JD")
+
             res = requests.post(
                 f"https://api.notion.com/v1/databases/{JOB_LISTING_DB_ID}/query",
                 headers=HEADERS, json={"page_size": 100}
@@ -1331,21 +1413,30 @@ with tab3:
             pending = []
             for row in rows:
                 props = row.get("properties", {})
-                status_prop = props.get("Status") or props.get("status") or props.get("สถานะ") or {}
-                sel = status_prop.get("select") or status_prop.get("status") or {}
+
+                # ── อ่าน status ด้วยชื่อ field จริง ──────────────
+                sp = props.get(status_field, {})
+                sel = sp.get("select") or sp.get("status") or {}
                 status_val = (sel.get("name") or "").strip()
                 if status_val and status_val.lower() not in ("", "no status", "no apply status"):
-                    continue
-                url_prop = props.get("URL") or props.get("url") or {}
-                url = (url_prop.get("url") or "").strip()
+                    continue  # มี status แล้ว → ข้าม
+
+                # ── URL ──────────────────────────────────────────
+                up = props.get(url_field, {})
+                url = (up.get("url") or "").strip()
                 if not url:
                     continue
-                name_prop = props.get("Name") or props.get("name") or {}
-                title_arr = name_prop.get("title", [])
+
+                # ── Name ─────────────────────────────────────────
+                np = props.get(name_field, {})
+                title_arr = np.get("title", [])
                 name = title_arr[0].get("plain_text", "") if title_arr else ""
-                jd_prop = props.get("JD") or props.get("jd") or {}
-                jd_arr  = jd_prop.get("rich_text", [])
+
+                # ── JD ───────────────────────────────────────────
+                jp = props.get(jd_field, {})
+                jd_arr  = jp.get("rich_text", [])
                 jd_text = jd_arr[0].get("plain_text", "") if jd_arr else ""
+
                 pending.append({
                     "notion_id": row["id"], "url": url,
                     "name": name or url[:60], "jd_text": jd_text,
