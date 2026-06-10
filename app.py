@@ -948,11 +948,15 @@ def analyze_with_llm(jd_text, retries=2):
     except RuntimeError as e:
         return {"error": str(e), "job_title": "Unknown", "company_name": "Unknown"}
 
-    for key in ("job_title", "company_name", "work_location", "wfh_policy",
-            "salary_min", "salary_max", "key_tech_stack", "industry",
-            "website", "apply_url"):
+    # ── Merge: fit_data เป็น base, แต่ key สำคัญให้ job_facts ชนะเสมอ ──
+    CORE_KEYS = ("job_title", "company_name", "work_location", "wfh_policy",
+                 "salary_min", "salary_max", "key_tech_stack", "industry",
+                 "website", "apply_url")
+    result = {**fit_data, **job_facts}  # job_facts ชนะ fit_data
+    # ถ้า job_facts ให้ค่าว่าง/null ให้ fallback กลับไปใช้ fit_data
+    for key in CORE_KEYS:
         if not result.get(key):
-            result[key] = job_facts.get(key) or result.get(key)
+            result[key] = fit_data.get(key) or job_facts.get(key) or ""
 
     # normalize keys ให้ตรงกับ analysis_to_notion_dicts ที่ใช้อยู่
     result.setdefault("job_title",    job_facts.get("job_title", "Unknown"))
