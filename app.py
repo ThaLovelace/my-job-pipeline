@@ -559,21 +559,56 @@ def analyze_with_gemini(jd_text, retries=3):
         try:
             resp = requests.post(url, json={
                 "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.3, "maxOutputTokens": 4096}
-            }, timeout=60)
+                "generationConfig": {
+                    "temperature": 0.3,
+                    "maxOutputTokens": 8192  # ✅ เพิ่มจาก 4096 → 8192
+                }
+            }, timeout=90)  # ✅ เพิ่ม timeout ด้วย
             resp.raise_for_status()
             raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
             raw = re.sub(r"^```json\s*", "", raw.strip())
             raw = re.sub(r"```\s*$", "", raw.strip())
-            return json.loads(raw)
+
+            # ✅ fallback: ถ้า JSON ถูกตัด ให้ลอง repair ก่อน error
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                # ตัด JSON ที่ไม่สมบูรณ์แล้วปิด brace ให้
+                # หา } สุดท้ายที่ valid แล้วปิดให้ครบ
+                last_brace = raw.rfind("}")
+                if last_brace != -1:
+                    repaired = raw[:last_brace + 1]
+                    try:
+                        return json.loads(repaired)
+                    except json.JSONDecodeError:
+                        pass
+                # ถ้า repair ไม่ได้เลย ดึงเฉพาะ fields สำคัญด้วย regex แทน
+                def extract(field, default=""):
+                    m = re.search(rf'"{field}"\s*:\s*"([^"]*)"', raw)
+                    return m.group(1) if m else default
+                return {
+                    "job_title":    extract("job_title", "Unknown"),
+                    "company_name": extract("company_name", "Unknown"),
+                    "fit_level":    extract("fit_level", "medium"),
+                    "apply_decision": extract("apply_decision", "WATCHLIST"),
+                    "role_tier":    extract("role_tier", ""),
+                    "work_location": extract("work_location", ""),
+                    "key_tech_stack": extract("key_tech_stack", ""),
+                    "gaps":         extract("gaps", ""),
+                    "notes":        extract("notes", ""),
+                    "wfh_policy":   extract("wfh_policy", "Unknown"),
+                    "company_size": extract("company_size", ""),
+                    "company_tier": extract("company_tier", ""),
+                    "industry":     extract("industry", ""),
+                    "error": "JSON truncated — partial data recovered"
+                }
+
         except requests.exceptions.HTTPError as e:
             if resp.status_code in (429, 503) and attempt < retries - 1:
-                wait = (attempt + 1) * 10  # 10s → 20s → 30s
+                wait = (attempt + 1) * 10
                 time.sleep(wait)
                 continue
             return {"error": str(e)}
-        except json.JSONDecodeError as e:
-            return {"error": f"JSON parse error: {e}"}
         except Exception as e:
             return {"error": str(e)}
     return {"error": "Gemini retry หมดแล้ว"}
