@@ -343,8 +343,13 @@ def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_
         return None, "ไม่มี JOB_LISTING_DB_ID"
 
     pmap = get_listing_property_map()
-    if not pmap:
-        return None, "ดึง property map จาก Notion ไม่ได้"
+    # fallback ถ้า detect ไม่ได้ — ใช้ชื่อที่รู้จากผู้ใช้โดยตรง
+    if not pmap.get("status"):
+        pmap = {
+            "status": "status", "status_type": "select",
+            "name": "Name", "url": "URL",
+            "company": "Company", "jd": "JD",
+        }
 
     status_map  = get_listing_status_map()
     status_name = status_map.get(status_key, status_key)
@@ -930,8 +935,8 @@ def _call_llm_raw(prompt, retries=2):
 
     Rate limit strategy (Groq Free tier):
     - 429 → รอตาม retry-after header จริงๆ (ไม่จำกัดรอบ) แล้วลองใหม่ใน model เดิม
-    - ถ้า retry-after > 120 วินาที → switch model ทันที (เพราะ TPM limit อาจรีเซตต่างกัน)
-    - ลอง llama-3.1-8b-instant เป็น fallback เมื่อ primary model ยังติด rate limit
+    - ถ้า retry-after > 120 วินาที → switch model ทันที
+    - 413 (payload too large) → ตัด prompt ลง 20% แล้วลองใหม่ใน model เดิม (max 3 รอบ)
     - 503/529 → backoff สั้น แล้วลองใหม่
     """
     if not GROQ_API_KEY:
@@ -940,14 +945,17 @@ def _call_llm_raw(prompt, retries=2):
     models = [
         "llama-3.3-70b-versatile",  # primary — ฉลาด instruction following ดี
         "llama-3.1-8b-instant",     # fallback — เร็วกว่า, quota แยกกัน
+        "gemma2-9b-it",             # fallback สุดท้าย
     ]
     last_err = ""
 
+    # ตัด prompt ได้สูงสุด 3 รอบ (ลดทีละ 20%) ก่อน switch model
+    current_prompt = prompt
+
     for model in models:
-        # 429 ใน model เดิม retry ได้ไม่จำกัดรอบ (รอจริงตาม header)
-        # แต่ cap ไว้ที่ 5 ครั้งต่อ model ก่อน switch
         max_429_waits = 5
         rate_limit_count = 0
+        trim_count = 0
 
         attempt = 0
         while attempt < retries + rate_limit_count:
@@ -961,7 +969,7 @@ def _call_llm_raw(prompt, retries=2):
                     },
                     json={
                         "model": model,
-                        "messages": [{"role": "user", "content": prompt}],
+                        "messages": [{"role": "user", "content": current_prompt}],
                         "max_tokens": 4096,
                         "temperature": 0.3,
                     },
@@ -978,13 +986,40 @@ def _call_llm_raw(prompt, retries=2):
                     rate_limit_count += 1
                     retry_after = int(resp.headers.get("retry-after", 30))
                     if retry_after > 120 or rate_limit_count > max_429_waits:
-                        # รอนานเกินไป หรือโดนซ้ำหลายรอบแล้ว → switch model
                         last_err = f"{model} rate-limited (retry-after={retry_after}s) → switching model"
                         break
-                    # รอตาม header จริงๆ แล้วลองใหม่ใน model เดิม
                     time.sleep(retry_after + 2)
                     attempt += 1
                     continue
+
+                if status == 413:
+                    # Payload too large — ตัด company_research ก่อน (ส่วนใหญ่ที่สุดและ optional)
+                    # ไม่ตัด prompt ตรงๆ เพราะจะทำให้คำตอบคุณภาพแย่ลง
+                    if trim_count < 3:
+                        trim_count += 1
+                        # หา block [company_research] แล้วย่อลงทีละ 40%
+                        import re as _re
+                        cr_match = _re.search(r'(══ COMPANY RESEARCH.*?)(\n══)', current_prompt, _re.DOTALL)
+                        if cr_match:
+                            cr_text = cr_match.group(1)
+                            cr_short = cr_text[:int(len(cr_text) * 0.4)] + "\n...(truncated)"
+                            current_prompt = current_prompt[:cr_match.start(1)] + cr_short + current_prompt[cr_match.end(1):]
+                        else:
+                            # ไม่มี block research → ตัด JD section แทน (สั้นลง 30%)
+                            jd_match = _re.search(r'(══ JD ที่ต้องวิเคราะห์.*?)(\n══)', current_prompt, _re.DOTALL)
+                            if jd_match:
+                                jd_text = jd_match.group(1)
+                                jd_short = jd_text[:int(len(jd_text) * 0.5)] + "\n...(truncated)"
+                                current_prompt = current_prompt[:jd_match.start(1)] + jd_short + current_prompt[jd_match.end(1):]
+                            else:
+                                # fallback สุดท้าย — switch model ดีกว่าตัดหน้าตาบุ่มบ่าม
+                                last_err = f"{model} 413 ตัด prompt ไม่ได้ → switching model"
+                                break
+                        last_err = f"{model} 413 → trim research/JD (round {trim_count})"
+                        attempt += 1
+                        continue
+                    last_err = f"{model} 413 after {trim_count} trims → switching model"
+                    break
 
                 if status in (503, 529):
                     if attempt < retries - 1:
@@ -993,7 +1028,7 @@ def _call_llm_raw(prompt, retries=2):
                         continue
                     break
 
-                # HTTP error อื่น → break ออกไป switch model
+                # HTTP error อื่น → switch model
                 break
 
             except requests.exceptions.Timeout:
