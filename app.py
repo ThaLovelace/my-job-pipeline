@@ -396,10 +396,19 @@ def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_
     if company_prop and company_name:
         props[company_prop] = {"rich_text": [{"text": {"content": company_name[:200]}}]}
 
-    # JD
-    jd_prop = pmap.get("jd")
-    if jd_prop and jd_raw:
-        props[jd_prop] = {"rich_text": [{"text": {"content": jd_raw[:2000]}}]}
+    # JD → เขียนลง page body แทน field (ไม่จำกัด 2000 chars)
+    # เก็บ jd_raw ไว้ใช้ตอน append blocks ทีหลัง
+    jd_blocks = []
+    if jd_raw:
+        jd_blocks.append({
+            "object": "block", "type": "heading_3",
+            "heading_3": {"rich_text": [{"text": {"content": "📄 Job Description"}}]}
+        })
+        for chunk in [jd_raw[i:i+1999] for i in range(0, len(jd_raw), 1999)]:
+            jd_blocks.append({
+                "object": "block", "type": "paragraph",
+                "paragraph": {"rich_text": [{"text": {"content": chunk}}]}
+            })
 
     # Notes (error + status label สำหรับ error states)
     notes_prop = pmap.get("notes")
@@ -422,26 +431,64 @@ def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_
                 headers=HEADERS,
                 json={"properties": props}
             )
+            result = res.json()
+            if "id" not in result:
+                notion_msg = result.get("message", "unknown error")
+                return None, f"{notion_msg} | pmap={pmap}"
+            page_id = result["id"]
+
+            # append JD blocks (replace ไม่ได้ใน Notion → append ต่อท้าย)
+            # ลบ blocks เก่าก่อนถ้ามีอยู่แล้ว เพื่อไม่ให้ซ้ำ
+            if jd_blocks:
+                _replace_page_blocks(page_id, jd_blocks)
+
         else:
             # สร้างใหม่ — ต้องมี title เสมอ
             if name_prop and name_prop not in props:
                 props[name_prop] = {"title": [{"text": {"content": (job_title or url)[:200]}}]}
+            payload = {"parent": {"database_id": JOB_LISTING_DB_ID}, "properties": props}
+            if jd_blocks:
+                payload["children"] = jd_blocks
             res = requests.post(
                 "https://api.notion.com/v1/pages",
                 headers=HEADERS,
-                json={"parent": {"database_id": JOB_LISTING_DB_ID}, "properties": props}
+                json=payload
             )
+            result = res.json()
+            if "id" not in result:
+                notion_msg = result.get("message", "unknown error")
+                return None, f"{notion_msg} | pmap={pmap}"
+            page_id = result["id"]
 
-        result = res.json()
-        if "id" in result:
-            return result["id"], None
-
-        # คืน error พร้อม context สำหรับ debug
-        notion_msg = result.get("message", "unknown error")
-        return None, f"{notion_msg} | pmap={pmap}"
+        return page_id, None
 
     except Exception as e:
         return None, str(e)
+
+
+def _replace_page_blocks(page_id, new_blocks):
+    """ลบ blocks ทั้งหมดใน page แล้ว append ใหม่"""
+    try:
+        # ดึง blocks เก่า
+        res = requests.get(
+            f"https://api.notion.com/v1/blocks/{page_id}/children",
+            headers=HEADERS
+        )
+        old_blocks = res.json().get("results", [])
+        # ลบทีละ block
+        for b in old_blocks:
+            requests.delete(
+                f"https://api.notion.com/v1/blocks/{b['id']}",
+                headers=HEADERS
+            )
+        # append blocks ใหม่
+        requests.patch(
+            f"https://api.notion.com/v1/blocks/{page_id}/children",
+            headers=HEADERS,
+            json={"children": new_blocks}
+        )
+    except Exception:
+        pass  # ถ้า replace ไม่ได้ก็ไม่เป็นไร — properties ยังอัปเดตแล้ว
 
 
 def query_all_jobs(filter_payload):
@@ -929,6 +976,24 @@ def fetch_jd(url):
 
     return None, " | ".join(errors)
 
+def _trim_prompt(prompt, target_chars):
+    """ย่อ prompt โดยตัด section ที่ใหญ่และ optional ก่อน — ไม่ตัดกลางๆ"""
+    if len(prompt) <= target_chars:
+        return prompt
+    # 1. ย่อ COMPANY RESEARCH ก่อน (ใหญ่สุด + optional)
+    m = re.search(r'(══ COMPANY RESEARCH.*?)(\n══)', prompt, re.DOTALL)
+    if m and len(prompt) > target_chars:
+        keep = max(200, int((target_chars - (len(prompt) - len(m.group(1)))))  )
+        prompt = prompt[:m.start(1)] + m.group(1)[:keep] + "\n...(ตัดทอน)\n" + prompt[m.end(1):]
+    # 2. ถ้ายังใหญ่อยู่ ย่อ JD DATA
+    m2 = re.search(r'(══ JD DATA.*?)(\n══)', prompt, re.DOTALL)
+    if m2 and len(prompt) > target_chars:
+        keep2 = max(200, int((target_chars - (len(prompt) - len(m2.group(1))))))
+        prompt = prompt[:m2.start(1)] + m2.group(1)[:keep2] + "\n...(ตัดทอน)\n" + prompt[m2.end(1):]
+    # 3. สุดท้าย hard cut (กรณี edge case)
+    return prompt[:target_chars] if len(prompt) > target_chars else prompt
+
+
 def _call_llm_raw(prompt, retries=2):
     """Low-level LLM call — returns raw text string or raises RuntimeError
     ใช้ Groq API (ฟรี) — llama-3.3-70b-versatile
@@ -936,26 +1001,31 @@ def _call_llm_raw(prompt, retries=2):
     Rate limit strategy (Groq Free tier):
     - 429 → รอตาม retry-after header จริงๆ (ไม่จำกัดรอบ) แล้วลองใหม่ใน model เดิม
     - ถ้า retry-after > 120 วินาที → switch model ทันที
-    - 413 (payload too large) → ตัด prompt ลง 20% แล้วลองใหม่ใน model เดิม (max 3 รอบ)
+    - 413 → ย่อ company_research / JD section แล้วลองใหม่ (ไม่ตัด prompt ตรงๆ)
+    - 400 → likely context too long → switch model ทันที
     - 503/529 → backoff สั้น แล้วลองใหม่
     """
     if not GROQ_API_KEY:
         raise RuntimeError("ไม่มี GROQ_API_KEY ใน secrets")
 
+    # (model, max_tokens_output, context_char_limit)
+    # context_char_limit ≈ 80% ของ context window จริง แปลงคร่าวๆ 1 token ≈ 3 chars
     models = [
-        "llama-3.3-70b-versatile",  # primary — ฉลาด instruction following ดี
-        "llama-3.1-8b-instant",     # fallback — เร็วกว่า, quota แยกกัน
-        "gemma2-9b-it",             # fallback สุดท้าย
+        ("llama-3.3-70b-versatile", 4096, 393216),  # 128k context
+        ("llama-3.1-8b-instant",    4096, 393216),  # 128k context
+        ("gemma2-9b-it",            2048,  24576),  # 8k context — ตั้ง max_tokens ต่ำกว่า
     ]
     last_err = ""
-
-    # ตัด prompt ได้สูงสุด 3 รอบ (ลดทีละ 20%) ก่อน switch model
     current_prompt = prompt
 
-    for model in models:
+    for model, max_tok, ctx_limit in models:
         max_429_waits = 5
         rate_limit_count = 0
         trim_count = 0
+
+        # ถ้า prompt ใหญ่เกิน context ของ model นี้ → ย่อก่อนส่ง
+        if len(current_prompt) > ctx_limit:
+            current_prompt = _trim_prompt(current_prompt, ctx_limit)
 
         attempt = 0
         while attempt < retries + rate_limit_count:
@@ -970,7 +1040,7 @@ def _call_llm_raw(prompt, retries=2):
                     json={
                         "model": model,
                         "messages": [{"role": "user", "content": current_prompt}],
-                        "max_tokens": 4096,
+                        "max_tokens": max_tok,
                         "temperature": 0.3,
                     },
                     timeout=60,
@@ -993,32 +1063,18 @@ def _call_llm_raw(prompt, retries=2):
                     continue
 
                 if status == 413:
-                    # Payload too large — ตัด company_research ก่อน (ส่วนใหญ่ที่สุดและ optional)
-                    # ไม่ตัด prompt ตรงๆ เพราะจะทำให้คำตอบคุณภาพแย่ลง
                     if trim_count < 3:
                         trim_count += 1
-                        # หา block [company_research] แล้วย่อลงทีละ 40%
-                        import re as _re
-                        cr_match = _re.search(r'(══ COMPANY RESEARCH.*?)(\n══)', current_prompt, _re.DOTALL)
-                        if cr_match:
-                            cr_text = cr_match.group(1)
-                            cr_short = cr_text[:int(len(cr_text) * 0.4)] + "\n...(truncated)"
-                            current_prompt = current_prompt[:cr_match.start(1)] + cr_short + current_prompt[cr_match.end(1):]
-                        else:
-                            # ไม่มี block research → ตัด JD section แทน (สั้นลง 30%)
-                            jd_match = _re.search(r'(══ JD ที่ต้องวิเคราะห์.*?)(\n══)', current_prompt, _re.DOTALL)
-                            if jd_match:
-                                jd_text = jd_match.group(1)
-                                jd_short = jd_text[:int(len(jd_text) * 0.5)] + "\n...(truncated)"
-                                current_prompt = current_prompt[:jd_match.start(1)] + jd_short + current_prompt[jd_match.end(1):]
-                            else:
-                                # fallback สุดท้าย — switch model ดีกว่าตัดหน้าตาบุ่มบ่าม
-                                last_err = f"{model} 413 ตัด prompt ไม่ได้ → switching model"
-                                break
-                        last_err = f"{model} 413 → trim research/JD (round {trim_count})"
+                        current_prompt = _trim_prompt(current_prompt, int(len(current_prompt) * 0.75))
+                        last_err = f"{model} 413 → trim (round {trim_count})"
                         attempt += 1
                         continue
                     last_err = f"{model} 413 after {trim_count} trims → switching model"
+                    break
+
+                if status == 400:
+                    # Bad request — likely context too long หรือ parameter ไม่รองรับ → switch model
+                    last_err = f"{model} 400 → switching model"
                     break
 
                 if status in (503, 529):
