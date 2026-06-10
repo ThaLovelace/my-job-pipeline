@@ -439,7 +439,7 @@ with tab2:
 # ── TAB 3: Batch Analyze ─────────────────────────────────
 CANDIDATE_PROFILE = """
 ═══════════════════════════════════════════
-WHO I AM — THAPANEE CHAIPRAPHA (ทับทิม)
+WHO I AM — THAPANEE CHAIPRAPHA (ส้มโอ)
 ═══════════════════════════════════════════
 Fresh grad (May 2026), Thammasat University — Software Engineering (CS)
 งานแรก — เปิดรับกว้าง แต่ prefer AI/Tech roles ที่ build ของจริง
@@ -524,56 +524,18 @@ VERSION FLOWACCOUNT — "Fintech Builder / SME Domain"
 """
 
 ANALYSIS_PROMPT = """
-คุณคือ career advisor อาวุโสที่รู้จัก Thapanee (ทับทิม) ดีมาก
-วิเคราะห์ JD ด้านล่างให้เธออย่างตรงไปตรงมา เหมือนเพื่อนที่ทำงาน HR มาบอก
-
-══ CANDIDATE PROFILE ══
+คุณคือ career advisor วิเคราะห์ JD นี้สำหรับผู้สมัคร:
 {profile}
 
-══ JD ที่ต้องวิเคราะห์ ══
+JD:
 {jd_text}
 
-══ วิธีคิดก่อน output ══
-ก่อน output JSON ให้คิดผ่าน 4 ข้อนี้ในใจก่อน (ไม่ต้องเขียนออกมา):
-1. บริษัทนี้ทำ AI จริงหรือ AI washing? — ดูจาก JD ว่า AI เป็น core หรือแค่ buzzword
-2. งานนี้ให้ ownership จริงหรือเปล่า? — design solution เองได้ หรือแค่ implement spec?
-3. culture fit กับทับทิมไหม? — fast learning, no bureaucracy, real impact?
-4. resume version ไหนเหมาะ? — match tone ของบริษัทและสิ่งที่ JD เน้น
-
-══ SCORING GUIDE ══
-fit_level:
-  high        = skill match ≥70% + culture fit + ไม่มี dealbreaker
-  medium-high = skill match ≥60% + culture fit หรือ skill match ≥70% แต่ culture มีข้อกังวล
-  medium      = skill match ≥50% หรือ culture fit แต่มีช่องว่างพอสมควร
-  low-medium  = skill match <50% หรือมี dealbreaker 1 ข้อ
-  low         = มี dealbreaker หลายข้อ หรือ mismatch ชัดเจน
-
-ai_depth_score (1-5):
-  5 = AI เป็น core product, ต้องทำ model / agent / production AI จริง
-  4 = AI สำคัญมาก มี engineering depth
-  3 = AI ใช้อยู่แต่ไม่ใช่ core
-  2 = AI แค่ tool ประกอบ
-  1 = แทบไม่มี AI / AI washing
-
-ownership_score (1-5):
-  5 = design + build + ship เอง, end-to-end ownership
-  4 = มี ownership สูง มีอิสระในการตัดสินใจ
-  3 = ปานกลาง มี spec แต่ยืดหยุ่นได้
-  2 = ส่วนใหญ่ implement ตาม spec
-  1 = pure execution, ไม่มี creative input
-
-apply_decision logic:
-  APPLY     = fit_level high/medium-high + ไม่มี dealbreaker + ai_depth≥3 + ownership≥3
-  WATCHLIST = fit_level medium + มีข้อดีชัดเจน + อาจรอดูข้อมูลเพิ่ม
-  PASS      = มี dealbreaker ชัด หรือ fit_level low/low-medium หรือ mismatch พื้นฐาน
-
-══ OUTPUT FORMAT ══
-ตอบกลับเป็น JSON เท่านั้น ห้ามมี markdown backticks หรือข้อความอื่นนอก JSON:
+ตอบกลับเป็น JSON เท่านั้น ห้ามมี markdown backticks หรือข้อความอื่นนอกจาก JSON:
 
 {{
-  "job_title": "ชื่อตำแหน่งจาก JD",
+  "job_title": "ชื่อตำแหน่ง",
   "company_name": "ชื่อบริษัท",
-  "role_tier": "Tier1/2/3 — เหตุผล 1 ประโยค",
+  "role_tier": "Tier1/2/3 - เหตุผลสั้นๆ",
   "fit_level": "high/medium-high/medium/low-medium/low",
   "work_location": "เมือง/ย่าน",
   "wfh_policy": "WFH Available/Hybrid/On-site/Unknown",
@@ -585,36 +547,34 @@ apply_decision logic:
   "ai_depth_score": 3,
   "ownership_score": 3,
   "my_skill_match_pct": 75,
-  "gap_skills": ["skill ที่ขาดจริงๆ ไม่ใช่แค่ nice-to-have"],
-  "resume_version": "VERSION A/B/RHENUS/THINKNET/ACCENTURE/FLOWACCOUNT",
-  "resume_reason": "เหตุผล 1-2 ประโยคว่าทำไม version นี้ถึง match tone ของบริษัทนี้",
+  "gap_skills": ["skill ที่ขาด"],
+  "resume_version": "VERSION A/B/RHENUS/THINKNET/ACCENTURE",
+  "resume_reason": "เหตุผลสั้นๆ",
   "apply_decision": "APPLY/WATCHLIST/PASS",
-  "apply_url": "ลิงค์สมัครโดยตรงจาก JD ถ้าไม่มีให้ใส่ค่าว่าง",
+  "apply_url": "ลิงค์สมัครงานโดยตรงจาก JD ถ้าไม่มีให้ใส่ค่าว่าง",
   "company_size": "startup/sme/enterprise",
-  "company_tier": "Level1/2/3 — เหตุผลสั้นๆ",
+  "company_tier": "Level1/2/3 - เหตุผล",
   "industry": "อุตสาหกรรม",
   "location": "Bangkok, Thailand",
   "website": "",
-  "gaps": "gap หลัก max 80 chars",
-  "notes": "สิ่งที่ต้องรู้ก่อน apply max 100 chars",
-  "narrative_analysis": "วิเคราะห์ละเอียดภาษาไทย ครอบคลุม: [1] บริษัทเป็นใคร ทำอะไร น่าเชื่อถือแค่ไหน [2] AI ที่บริษัทนี้ทำ — จริงหรือ washing? [3] งานนี้ให้ ownership และ creative input แค่ไหน [4] culture fit กับทับทิม — fast/no bureaucracy/real impact ไหม [5] เงินและสวัสดิการ [6] green flags และ red flags ที่เห็นใน JD [7] สรุป — ทำไมถึง APPLY/WATCHLIST/PASS พร้อมเหตุผลตรงๆ",
+  "gaps": "gap หลักสั้นๆ max 80 chars",
+  "notes": "note สำคัญ max 100 chars",
+  "narrative_analysis": "วิเคราะห์ละเอียดภาษาไทย: บริษัทเป็นยังไง / เงิน-สวัสดิการ / AI จริงหรือ AI washing / เติบโตได้ไหม / red flags / green flags / สรุป APPLY-WATCHLIST-PASS",
   "interview_prep": {{
-    "behavioral_questions": [
-      {{"question": "คำถาม behavioral ที่น่าจะถามสำหรับบริษัทนี้", "answer_guide": "แนวตอบที่ดึง project/experience ของทับทิมมาใช้"}}
-    ],
-    "technical_questions": [
-      {{"question": "คำถาม technical ตาม stack ของ JD นี้", "answer_guide": "แนวตอบพร้อมตัวอย่างจาก project จริง"}}
-    ],
-    "questions_to_ask": ["คำถามถามกลับ employer ที่ช่วยประเมิน culture/ownership/AI depth จริงๆ"],
-    "salary_negotiation_script": "script ต่อรองเงินภาษาไทย เหมาะกับ culture ของบริษัทนี้"
+    "behavioral_questions": [{{"question": "?", "answer_guide": "?"}}],
+    "technical_questions":  [{{"question": "?", "answer_guide": "?"}}],
+    "questions_to_ask": ["คำถามถามกลับ employer"],
+    "salary_negotiation_script": "script ต่อรองเงินภาษาไทย"
   }},
   "application_guide": {{
-    "how_to_apply": "วิธี apply และ channel ที่ดีที่สุด",
-    "form_questions_to_prepare": ["คำถามในฟอร์มหรือ screening ที่น่าจะเจอ"],
-    "things_to_prepare": ["สิ่งที่ต้องเตรียมก่อน apply เช่น portfolio, cover letter focus, etc."]
+    "how_to_apply": "วิธี apply",
+    "form_questions_to_prepare": ["คำถามในฟอร์มที่น่าจะเจอ"],
+    "things_to_prepare": ["สิ่งที่ต้องเตรียม"]
   }}
 }}
-ถ้า JD ดึงไม่ได้หรือข้อมูลน้อยเกินไป: {{"error": "ไม่สามารถดึง JD ได้", "job_title": "Unknown", "company_name": "Unknown"}}
+
+ถ้า JD เป็นข้อความ Error (เช่น Fetch error, 403 Forbidden) หรือไม่มีเนื้อหางานเลย ให้ตอบแค่: {{"error": "ไม่สามารถดึง JD ได้", "job_title": "Unknown", "company_name": "Unknown"}}
+*ข้อควรระวัง: ถ้าเนื้อหามีการระบุหน้าที่รับผิดชอบ (Responsibilities) หรือทักษะที่ต้องการ ห้ามตอบเป็น Error เด็ดขาด ให้พยายามวิเคราะห์ให้ได้มากที่สุด และถ้าหาชื่อตำแหน่งหรือบริษัทไม่เจอจริงๆ ค่อยใส่เป็น "Unknown" ในฟิลด์นั้นๆ*
 """
 
 
@@ -693,23 +653,55 @@ def _fetch_with_requests(url):
 
 
 def fetch_jd(url):
-    """
-    Returns (content, error_message). error_message is None on success.
-    ลำดับ: ScraperAPI → requests ธรรมดา
-    """
+    hdrs = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/124.0.0.0 Safari/537.36"),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "th-TH,th;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Referer": "https://www.google.com/",
+    }
     if "facebook.com" in url:
-        return None, "Facebook URL — กรุณา copy JD มาวางเองค่ะ"
+        return f"[Facebook — กรุณา copy JD มาวางเอง]\nURL: {url}"
     if "linkedin.com" in url:
-        return None, "LinkedIn URL — กรุณา copy JD มาวางเองค่ะ"
-
-    errors = []
-    for name, fn in [("ScraperAPI", _fetch_with_scraperapi), ("requests", _fetch_with_requests)]:
-        text, err = fn(url)
-        if text:
-            return text, None
-        errors.append(f"{name}: {err}")
-
-    return None, " | ".join(errors)
+        return f"[LinkedIn — กรุณา copy JD มาวางเอง]\nURL: {url}"
+    try:
+        resp = requests.get(url, headers=hdrs, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        
+        # ── แก้ไข 1: ดึง Title ของหน้าเว็บมาช่วยให้ AI รู้ชื่อตำแหน่งและบริษัท ──
+        page_title = soup.title.get_text(strip=True) if soup.title else "Unknown Title"
+        
+        for tag in soup(["script", "style", "nav", "header", "footer", "iframe"]):
+            tag.decompose()
+            
+        extracted_text = ""
+        if "jobsdb.com" in url:
+            section = soup.find("div", {"data-automation": "jobAdDetails"})
+            if section:
+                extracted_text = section.get_text(separator="\n", strip=True)[:6000]
+        if not extracted_text and "jobthai.com" in url:
+            section = soup.find("div", class_=re.compile("job-detail|detail-content", re.I))
+            if section:
+                extracted_text = section.get_text(separator="\n", strip=True)[:6000]
+                
+        if not extracted_text:
+            main = soup.find("main") or soup.find("article") or soup.body
+            if main:
+                text = main.get_text(separator="\n", strip=True)
+                extracted_text = re.sub(r"\n{3,}", "\n\n", text)[:6000]
+                
+        # ── แก้ไข 2: เอา Title มาแปะไว้บนสุดของ JD ──
+        if extracted_text:
+            return f"[Web Title: {page_title}]\n\n{extracted_text}"
+            
+    except Exception as e:
+        return f"[Fetch error: {e}]\nURL: {url}"
+    return "[ไม่สามารถดึง content ได้]"
 
 
 def analyze_with_llm(jd_text, retries=2):
