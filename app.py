@@ -1229,78 +1229,145 @@ def analysis_to_notion_dicts(a, job_url):
 
 
 with tab3:
-    st.markdown("วิเคราะห์ job จาก URL เดี่ยว หรืออัปโหลด CSV รายการ URL → LLM → Notion ค่ะ")
-
     if not GROQ_API_KEY:
         st.warning("⚠️ ยังไม่มี `GROQ_API_KEY` ใน Streamlit Secrets ค่ะ")
 
-    delay       = st.slider("หน่วงเวลาระหว่าง request (วินาที)", 5, 30, 12,
-                            help="แนะนำ 12+ วินาที เพื่อหลีกเลี่ยง rate limit")
-    push_notion = st.checkbox("Push เข้า Notion อัตโนมัติ", value=True)
+    # ── Settings ─────────────────────────────────────────────
+    with st.expander("⚙️ Settings", expanded=False):
+        delay = st.slider("หน่วงเวลาระหว่าง request (วินาที)", 5, 30, 12,
+                          help="แนะนำ 12+ วินาที เพื่อหลีกเลี่ยง Groq rate limit")
 
-    mode = st.radio("วิธีใส่ job", ["🔗 วาง URL เดี่ยว", "📝 วาง JD โดยตรง", "📂 อัปโหลด CSV"], horizontal=True)
+    st.markdown("---")
 
-    jobs = []
-
-    if mode == "🔗 วาง URL เดี่ยว":
-        raw_urls = st.text_area(
-            "วาง URL (ได้หลายบรรทัด — 1 URL ต่อบรรทัด)",
-            height=150,
-            placeholder="https://th.jobsdb.com/job/12345\nhttps://www.jobthai.com/en/job/67890"
-        )
-        if raw_urls.strip():
-            seen = set()
-            for line in raw_urls.strip().splitlines():
-                url = line.strip()
+    # ══════════════════════════════════════════════════════════
+    # SECTION A — ดึงจาก Job Listing DB (main flow)
+    # ══════════════════════════════════════════════════════════
+    def fetch_pending_listings():
+        """ดึง rows ใน Job Listing DB ที่ยังไม่มีสถานะ"""
+        if not JOB_LISTING_DB_ID:
+            return [], "ไม่มี JOB_LISTING_DB_ID"
+        try:
+            res = requests.post(
+                f"https://api.notion.com/v1/databases/{JOB_LISTING_DB_ID}/query",
+                headers=HEADERS, json={"page_size": 100}
+            )
+            rows = res.json().get("results", [])
+            pending = []
+            for row in rows:
+                props = row.get("properties", {})
+                status_prop = props.get("Status") or props.get("status") or props.get("สถานะ") or {}
+                sel = status_prop.get("select") or status_prop.get("status") or {}
+                status_val = (sel.get("name") or "").strip()
+                if status_val and status_val.lower() not in ("", "no status", "no apply status"):
+                    continue
+                url_prop = props.get("URL") or props.get("url") or {}
+                url = (url_prop.get("url") or "").strip()
                 if not url:
                     continue
-                base = url.split("?")[0].rstrip("/")
-                if base not in seen:
-                    seen.add(base)
-                    jobs.append({"url": url, "name": url[:60]})
-            if jobs:
-                st.info(f"พบ **{len(jobs)}** URL")
+                name_prop = props.get("Name") or props.get("name") or {}
+                title_arr = name_prop.get("title", [])
+                name = title_arr[0].get("plain_text", "") if title_arr else ""
+                jd_prop = props.get("JD") or props.get("jd") or {}
+                jd_arr  = jd_prop.get("rich_text", [])
+                jd_text = jd_arr[0].get("plain_text", "") if jd_arr else ""
+                pending.append({
+                    "notion_id": row["id"], "url": url,
+                    "name": name or url[:60], "jd_text": jd_text,
+                })
+            return pending, None
+        except Exception as e:
+            return [], str(e)
 
-    elif mode == "📝 วาง JD โดยตรง":
-        st.markdown("วาง JD ที่ copy มาจาก Facebook, LinkedIn, หรือเว็บอื่นที่ fetch ไม่ได้ค่ะ")
-        manual_url = st.text_input(
-            "URL ต้นทาง (ไม่บังคับ — ใส่เพื่อเก็บ link ใน Notion)",
-            placeholder="https://www.facebook.com/share/p/..."
-        )
-        manual_jd = st.text_area(
-            "วาง JD ที่นี่",
-            height=300,
-            placeholder="ชื่อตำแหน่ง: ...\nบริษัท: ...\nหน้าที่: ..."
-        )
-        if manual_jd.strip():
-            ref_url = manual_url.strip() or f"manual://jd-{hash(manual_jd[:100]) % 100000}"
-            jobs.append({"url": ref_url, "name": ref_url[:60], "jd_text": manual_jd.strip()})
-            st.info("พบ **1** JD พร้อมวิเคราะห์")
+    jobs_to_run = []
+    source = None
 
+    if JOB_LISTING_DB_ID:
+        st.subheader("📋 Job Listing Queue")
+        col_btn, col_info = st.columns([1, 3])
+        with col_btn:
+            do_refresh = st.button("🔄 โหลด Queue", key="btn_refresh_queue")
+
+        if do_refresh or "listing_queue" not in st.session_state:
+            with st.spinner("กำลังดึง Job Listing DB..."):
+                q, qerr = fetch_pending_listings()
+            if qerr:
+                st.error(f"❌ {qerr}")
+                st.session_state["listing_queue"] = []
+            else:
+                st.session_state["listing_queue"] = q
+
+        queue = st.session_state.get("listing_queue", [])
+
+        if queue:
+            with col_info:
+                st.info(f"พบ **{len(queue)}** งานรอวิเคราะห์")
+
+            with st.expander(f"ดูรายการทั้งหมด ({len(queue)} งาน)", expanded=False):
+                for i, q_job in enumerate(queue, 1):
+                    has_jd = " *(มี JD แล้ว)*" if q_job.get("jd_text") else ""
+                    st.caption(f"{i}. {q_job['name'][:80]}  •  `{q_job['url'][:55]}`{has_jd}")
+
+            if st.button(f"🚀 วิเคราะห์ {len(queue)} งาน → Push Notion อัตโนมัติ",
+                         key="btn_run_queue", type="primary"):
+                jobs_to_run = queue
+                source = "listing_db"
+        else:
+            with col_info:
+                st.success("✅ ไม่มีงานค้างใน Queue")
+            st.caption("เพิ่ม URL ลงใน Job Listing DB ใน Notion แล้วกด 🔄 โหลด Queue")
+
+        st.markdown("---")
     else:
-        uploaded = st.file_uploader("อัปโหลด Job_Listings.csv", type="csv")
-        if uploaded:
-            import csv, io
-            content = uploaded.read().decode("utf-8-sig")
-            reader  = csv.DictReader(io.StringIO(content))
-            seen, dupes = set(), 0
-            for row in reader:
-                url = (row.get("URL") or "").strip()
-                if not url:
-                    continue
-                base = url.split("?")[0].rstrip("/")
-                if base in seen:
-                    dupes += 1
-                    continue
-                seen.add(base)
-                jobs.append({"url": url, "name": (row.get("Name") or "").strip()})
-            if jobs:
-                st.info(f"พบ **{len(jobs)}** unique jobs ({dupes} duplicates ถูกตัดออก)")
+        st.warning("⚠️ ยังไม่ได้ตั้งค่า `JOB_LISTING_DB_ID` — ใช้โหมดใส่เองด้านล่างแทนได้ค่ะ")
 
-    if st.button("🚀 Start Batch Analyze", key="btn_batch"):
-        if not jobs:
-            st.warning("⚠️ กรุณาใส่ URL หรืออัปโหลด CSV ก่อนนะคะ")
-            st.stop()
+    # ══════════════════════════════════════════════════════════
+    # SECTION B — ใส่เองด้วยมือ (backup / one-off)
+    # ══════════════════════════════════════════════════════════
+    with st.expander("➕ เพิ่มงานเองด้วยมือ (URL / JD โดยตรง)",
+                     expanded=not bool(JOB_LISTING_DB_ID)):
+        mode_manual = st.radio("วิธีใส่", ["🔗 วาง URL", "📝 วาง JD โดยตรง"],
+                               horizontal=True, key="manual_mode")
+        manual_jobs = []
+
+        if mode_manual == "🔗 วาง URL":
+            raw_urls = st.text_area("วาง URL (1 บรรทัด / URL)", height=120,
+                                    placeholder="https://th.jobsdb.com/job/12345",
+                                    key="manual_urls")
+            if raw_urls.strip():
+                seen_m = set()
+                for line in raw_urls.strip().splitlines():
+                    u = line.strip()
+                    if not u:
+                        continue
+                    base = u.split("?")[0].rstrip("/")
+                    if base not in seen_m:
+                        seen_m.add(base)
+                        manual_jobs.append({"url": u, "name": u[:60]})
+                if manual_jobs:
+                    st.caption(f"พบ {len(manual_jobs)} URL")
+        else:
+            m_url = st.text_input("URL ต้นทาง (ไม่บังคับ)",
+                                  placeholder="https://www.facebook.com/share/p/...",
+                                  key="manual_jd_url")
+            m_jd  = st.text_area("วาง JD ที่นี่", height=250,
+                                  placeholder="ชื่อตำแหน่ง: ...\nบริษัท: ...",
+                                  key="manual_jd_text")
+            if m_jd.strip():
+                ref = m_url.strip() or f"manual://jd-{hash(m_jd[:100]) % 100000}"
+                manual_jobs.append({"url": ref, "name": ref[:60], "jd_text": m_jd.strip()})
+                st.caption("พบ 1 JD พร้อมวิเคราะห์")
+
+        if manual_jobs:
+            if st.button("🚀 วิเคราะห์ + Push Notion", key="btn_manual_run"):
+                jobs_to_run = manual_jobs
+                source = "manual"
+
+    # ══════════════════════════════════════════════════════════
+    # SECTION C — Pipeline ประมวลผล (ทำงานเมื่อกดปุ่มใดก็ตาม)
+    # ══════════════════════════════════════════════════════════
+    if jobs_to_run:
+        st.markdown("---")
+        st.subheader("⚙️ กำลังประมวลผล...")
 
         stats    = {"ok": 0, "err": 0, "notion_ok": 0, "notion_err": 0}
         results  = []
@@ -1312,105 +1379,95 @@ with tab3:
             logs.append(msg)
             log_area.code("\n".join(logs[-30:]))
 
-        for i, job in enumerate(jobs):
+        for i, job in enumerate(jobs_to_run):
             url  = job["url"]
-            name = job["name"] or url[:50]
-            progress.progress(i / len(jobs), text=f"[{i+1}/{len(jobs)}] {name[:40]}...")
+            name = job.get("name") or url[:50]
+            progress.progress(i / len(jobs_to_run), text=f"[{i+1}/{len(jobs_to_run)}] {name[:40]}...")
+            add_log(f"\n[{i+1}/{len(jobs_to_run)}] {name[:55]}")
 
-            add_log(f"\n[{i+1}/{len(jobs)}] {name[:55]}")
-            # ถ้า job มี jd_text แนบมาแล้ว (กรณีวาง JD โดยตรง) ข้าม fetch
             if job.get("jd_text"):
                 jd = job["jd_text"]
-                add_log(f"  📋 ใช้ JD ที่วางมาโดยตรง ({len(jd)} chars)")
+                add_log(f"  📋 ใช้ JD ที่มีอยู่แล้ว ({len(jd)} chars)")
             else:
                 add_log(f"  🌐 Fetching JD...")
                 jd, fetch_err = fetch_jd(url)
                 if fetch_err:
                     add_log(f"  ❌ Fetch failed: {fetch_err}")
-                    add_log(f"  ⏭️ ข้ามไปก่อนเลยค่ะ — ไม่ส่งเข้า LLM")
                     stats["err"] += 1
                     results.append({"url": url, "name": name, "status": "error", "error": fetch_err})
-                    # บันทึก error ลง Job Listing DB
                     if JOB_LISTING_DB_ID:
-                        _, lerr = upsert_job_listing(url, error_note=f"Fetch failed: {fetch_err}")
-                        add_log(f"  📋 Listing saved (error){'' if not lerr else f' — {lerr}'}")
-                    if i < len(jobs) - 1:
+                        upsert_job_listing(url, error_note=f"Fetch failed: {fetch_err}")
+                        add_log(f"  📋 Listing: บันทึก error แล้ว")
+                    if i < len(jobs_to_run) - 1:
                         time.sleep(delay)
                     continue
                 add_log(f"  📄 {jd[:80].replace(chr(10),' ')}...")
 
-            add_log(f"  🤖 Analyzing with LLM...")
+            add_log(f"  🤖 Analyzing + researching บริษัท...")
             analysis = analyze_with_llm(jd)
-            # แสดงว่า research บริษัทได้ข้อมูลไหม
-            cn_for_log = analysis.get("company_name", "?")
-            research_status = "🔍 researched" if cn_for_log not in ("?", "Unknown", "Not specified", "") else "⚠️ no research"
-            add_log(f"  {research_status}: {cn_for_log}")
+            cn_log = analysis.get("company_name", "?")
+            has_research = cn_log not in ("?", "Unknown", "Not specified", "")
+            add_log(f"  {'🔍' if has_research else '⚠️'} {cn_log}")
 
             if "error" in analysis and analysis.get("job_title", "Unknown") == "Unknown" and analysis.get("company_name", "Unknown") == "Unknown":
-                add_log(f"  ❌ {analysis['error']}")
+                add_log(f"  ❌ LLM error: {analysis['error']}")
                 stats["err"] += 1
                 results.append({"url": url, "name": name, "status": "error", "error": analysis["error"]})
-                # บันทึก LLM error ลง Job Listing
                 if JOB_LISTING_DB_ID:
                     upsert_job_listing(url, jd_raw=jd[:2000] if 'jd' in dir() else "",
                                        error_note=f"LLM error: {analysis.get('error','')}")
             else:
-                jt = analysis.get('job_title', '?')
-                cn = analysis.get('company_name', '?')
-                add_log(f"  ✅ {jt} @ {cn} "
-                        f"| {analysis.get('fit_level','?')} | {analysis.get('apply_decision','?')}")
+                jt = analysis.get("job_title", "?")
+                cn = analysis.get("company_name", "?")
+                decision = analysis.get("apply_decision", "?")
+                add_log(f"  ✅ {jt} @ {cn} | {analysis.get('fit_level','?')} | {decision}")
                 stats["ok"] += 1
                 result_entry = {"url": url, "name": name, "status": "ok", "analysis": analysis}
 
-                # บันทึกสถานะ Consider + ข้อมูลดิบลง Job Listing ทันที
+                # บันทึก Consider + ข้อมูลดิบ
                 if JOB_LISTING_DB_ID:
-                    _, lerr = upsert_job_listing(
-                        url,
-                        job_title=jt,
-                        company_name=cn,
-                        jd_raw=jd[:2000] if 'jd' in dir() else "",
-                        status_key="consider",
-                    )
-                    add_log(f"  📋 Listing: Consider{'' if not lerr else f' (warn: {lerr})'}")
+                    upsert_job_listing(url, job_title=jt, company_name=cn,
+                                       jd_raw=jd[:2000] if 'jd' in dir() else "",
+                                       status_key="consider")
+                    add_log(f"  📋 Listing: Consider")
 
-                if push_notion:
-                    add_log(f"  📤 Pushing to Notion...")
-                    try:
-                        j_data, c_data = analysis_to_notion_dicts(analysis, url)
-                        if not j_data.get("job_title", "").strip():
-                            raise ValueError("no job title")
-                        cname = c_data.get("company_name", "").strip()
-                        if not cname or cname.lower() in ("not specified", "unknown", ""):
-                            raise ValueError(f"company name ว่างหรือไม่ชัดเจน ('{cname}') — กรุณาระบุชื่อบริษัทเองค่ะ")
-                        company_id, found = search_company(cname)
-                        if not found or not company_id:
-                            company_id, err = create_company(c_data, opt)
-                            if err:
-                                raise ValueError(f"create company: {err}")
-                        ok_job, err_job = create_job(j_data, company_id, opt)
-                        if not ok_job:
-                            raise ValueError(f"create job: {err_job}")
-                        add_log(f"  ✅ Notion OK")
-                        stats["notion_ok"] += 1
+                # Push Notion อัตโนมัติเสมอ
+                add_log(f"  📤 Pushing to Notion...")
+                try:
+                    j_data, c_data = analysis_to_notion_dicts(analysis, url)
+                    if not j_data.get("job_title", "").strip():
+                        raise ValueError("no job title")
+                    cname = c_data.get("company_name", "").strip()
+                    if not cname or cname.lower() in ("not specified", "unknown", ""):
+                        raise ValueError(f"company name ไม่ชัดเจน ('{cname}')")
+                    company_id, found = search_company(cname)
+                    if not found or not company_id:
+                        company_id, cerr = create_company(c_data, opt)
+                        if cerr:
+                            raise ValueError(f"create company: {cerr}")
+                    ok_job, err_job = create_job(j_data, company_id, opt)
+                    if not ok_job:
+                        raise ValueError(f"create job: {err_job}")
+                    add_log(f"  ✅ Notion OK")
+                    stats["notion_ok"] += 1
 
-                        # อัปเดต Listing ตาม apply_decision
-                        if JOB_LISTING_DB_ID:
-                            decision = analysis.get("apply_decision", "").upper()
-                            listing_status = "added" if decision == "APPLY" else "not_apply"
-                            upsert_job_listing(url, status_key=listing_status)
-                            add_log(f"  📋 Listing: {'Added' if listing_status == 'added' else 'Not Apply'}")
+                    # อัปเดต Listing สถานะสุดท้าย
+                    if JOB_LISTING_DB_ID:
+                        lst = "added" if decision == "APPLY" else "not_apply"
+                        upsert_job_listing(url, status_key=lst)
+                        add_log(f"  📋 Listing: {'Added ✅' if lst == 'added' else 'Not Apply ❌'}")
 
-                    except Exception as e:
-                        add_log(f"  ❌ Notion error: {e}")
-                        stats["notion_err"] += 1
-                        # Listing คง Consider ไว้ (ไม่เปลี่ยน) เพื่อให้รู้ว่ายังค้างอยู่
+                except Exception as e:
+                    add_log(f"  ❌ Notion error: {e}")
+                    stats["notion_err"] += 1
+                    add_log(f"  📋 Listing: คง Consider ไว้ (ยังค้าง)")
 
                 results.append(result_entry)
 
-            if i < len(jobs) - 1:
+            if i < len(jobs_to_run) - 1:
                 time.sleep(delay)
 
-        if push_notion and stats["notion_ok"] > 0:
+        if stats["notion_ok"] > 0:
             add_log("\n📊 Reranking all jobs...")
             try:
                 rerank_all_jobs(opt, add_log)
@@ -1418,74 +1475,27 @@ with tab3:
             except Exception as e:
                 add_log(f"❌ Rerank error: {e}")
 
-        progress.progress(1.0, text="เสร็จแล้ว! ✨")
-        st.success(f"เสร็จแล้ว! ✅ {stats['ok']} analyzed | 📤 {stats['notion_ok']} pushed | ❌ {stats['err']} errors")
+        # ── Clear queue ถ้ามาจาก Listing DB ─────────────────
+        if source == "listing_db":
+            st.session_state["listing_queue"] = []
 
-        # ── แสดง URL ที่ fetch ไม่ได้ พร้อม manual input ──────
-        failed_jobs = [r for r in results if r.get("status") == "error"]
-        if failed_jobs:
-            st.markdown("---")
-            st.warning(f"⚠️ **{len(failed_jobs)} URL ที่ fetch ไม่ได้** — วาง JD เองได้ที่นี่ค่ะ")
-            for fr in failed_jobs:
-                with st.expander(f"🔗 {fr['url'][:70]}  •  {fr.get('error','')}"):
-                    manual_text = st.text_area(
-                        "วาง JD ที่นี่",
-                        key=f"manual_{hash(fr['url']) % 999999}",
-                        height=200,
-                        placeholder="Copy JD มาวางได้เลยค่ะ..."
-                    )
-                    if st.button("วิเคราะห์ + Push Notion", key=f"btn_manual_{hash(fr['url']) % 999999}"):
-                        if manual_text.strip():
-                            with st.spinner("วิเคราะห์อยู่..."):
-                                a2 = analyze_with_llm(manual_text.strip())
-                            if "error" not in a2 or a2.get("job_title") != "Unknown":
-                                jt2 = a2.get('job_title', '?')
-                                cn2_display = a2.get('company_name', '?')
-                                st.success(f"✅ {jt2} @ {cn2_display}")
-                                # บันทึก Consider ก่อนเลย
-                                if JOB_LISTING_DB_ID:
-                                    upsert_job_listing(
-                                        fr["url"],
-                                        job_title=jt2,
-                                        company_name=cn2_display,
-                                        jd_raw=manual_text.strip()[:2000],
-                                        status_key="consider",
-                                    )
-                                if push_notion:
-                                    try:
-                                        j2, c2 = analysis_to_notion_dicts(a2, fr["url"])
-                                        if not j2.get("job_title","").strip():
-                                            raise ValueError("no job title")
-                                        cn2 = c2.get("company_name", "").strip()
-                                        if not cn2 or cn2.lower() in ("not specified", "unknown", ""):
-                                            raise ValueError(f"company name ว่าง ('{cn2}') — กรุณาระบุชื่อบริษัทเองค่ะ")
-                                        cid, found2 = search_company(cn2)
-                                        if not found2 or not cid:
-                                            cid, cerr = create_company(c2, opt)
-                                            if cerr: raise ValueError(cerr)
-                                        ok2, jerr = create_job(j2, cid, opt)
-                                        if ok2:
-                                            st.success("📤 Push Notion สำเร็จค่ะ!")
-                                            # อัปเดต Listing สถานะ
-                                            if JOB_LISTING_DB_ID:
-                                                d2 = a2.get("apply_decision", "").upper()
-                                                upsert_job_listing(fr["url"],
-                                                    status_key="added" if d2 == "APPLY" else "not_apply")
-                                        else:
-                                            st.error(f"Notion error: {jerr}")
-                                    except Exception as ex:
-                                        st.error(f"❌ {ex}")
-                            else:
-                                st.error(f"LLM error: {a2.get('error')}")
-                        else:
-                            st.warning("กรุณาวาง JD ก่อนค่ะ")
+        progress.progress(1.0, text="เสร็จแล้ว! ✨")
+
+        # ── Summary ───────────────────────────────────────────
+        st.markdown("---")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("วิเคราะห์ได้",  stats["ok"])
+        c2.metric("Push Notion",   stats["notion_ok"])
+        c3.metric("Error",         stats["err"])
+        c4.metric("Notion Error",  stats["notion_err"])
 
         all_a = [r["analysis"] for r in results if r.get("status") == "ok"]
         if all_a:
-            col_a, col_b, col_c = st.columns(3)
-            col_a.metric("APPLY",     sum(1 for a in all_a if a.get("apply_decision") == "APPLY"))
-            col_b.metric("WATCHLIST", sum(1 for a in all_a if a.get("apply_decision") == "WATCHLIST"))
-            col_c.metric("PASS",      sum(1 for a in all_a if a.get("apply_decision") == "PASS"))
+            st.markdown("**ผลการตัดสิน**")
+            ca, cw, cp = st.columns(3)
+            ca.metric("✅ APPLY",     sum(1 for a in all_a if a.get("apply_decision") == "APPLY"))
+            cw.metric("👀 WATCHLIST", sum(1 for a in all_a if a.get("apply_decision") == "WATCHLIST"))
+            cp.metric("❌ PASS",      sum(1 for a in all_a if a.get("apply_decision") == "PASS"))
             all_gaps = [g for a in all_a for g in a.get("gap_skills", [])]
             gc = {}
             for g in all_gaps:
@@ -1495,9 +1505,54 @@ with tab3:
             if top:
                 st.caption(f"Top skill gaps: {', '.join(f'{g}({n})' for g,n in top)}")
 
-        st.download_button(
-            "⬇️ Download jobs_analyzed.json",
-            data=json.dumps(results, ensure_ascii=False, indent=2),
-            file_name="jobs_analyzed.json",
-            mime="application/json"
-        )
+        # ── Failed jobs — retry ───────────────────────────────
+        failed_jobs = [r for r in results if r.get("status") == "error"]
+        if failed_jobs:
+            st.markdown("---")
+            st.warning(f"⚠️ **{len(failed_jobs)} URL fetch ไม่ได้** — วาง JD เองได้ที่นี่ค่ะ")
+            for fr in failed_jobs:
+                with st.expander(f"🔗 {fr['url'][:70]}  •  {fr.get('error','')}"):
+                    retry_jd = st.text_area("วาง JD ที่นี่",
+                                            key=f"retry_{hash(fr['url']) % 999999}",
+                                            height=200, placeholder="Copy JD มาวางได้เลยค่ะ...")
+                    if st.button("วิเคราะห์ + Push", key=f"btn_retry_{hash(fr['url']) % 999999}"):
+                        if retry_jd.strip():
+                            with st.spinner("วิเคราะห์..."):
+                                a2 = analyze_with_llm(retry_jd.strip())
+                            if "error" not in a2 or a2.get("job_title") != "Unknown":
+                                jt2 = a2.get("job_title", "?")
+                                cn2d = a2.get("company_name", "?")
+                                st.success(f"✅ {jt2} @ {cn2d}")
+                                if JOB_LISTING_DB_ID:
+                                    upsert_job_listing(fr["url"], job_title=jt2, company_name=cn2d,
+                                                       jd_raw=retry_jd.strip()[:2000], status_key="consider")
+                                try:
+                                    j2, c2 = analysis_to_notion_dicts(a2, fr["url"])
+                                    if not j2.get("job_title","").strip():
+                                        raise ValueError("no job title")
+                                    cn2 = c2.get("company_name","").strip()
+                                    if not cn2 or cn2.lower() in ("not specified","unknown",""):
+                                        raise ValueError(f"company name ว่าง ('{cn2}')")
+                                    cid, f2 = search_company(cn2)
+                                    if not f2 or not cid:
+                                        cid, cerr2 = create_company(c2, opt)
+                                        if cerr2: raise ValueError(cerr2)
+                                    ok2, jerr2 = create_job(j2, cid, opt)
+                                    if ok2:
+                                        st.success("📤 Push Notion สำเร็จค่ะ!")
+                                        if JOB_LISTING_DB_ID:
+                                            d2 = a2.get("apply_decision","").upper()
+                                            upsert_job_listing(fr["url"],
+                                                status_key="added" if d2 == "APPLY" else "not_apply")
+                                    else:
+                                        st.error(f"Notion error: {jerr2}")
+                                except Exception as ex:
+                                    st.error(f"❌ {ex}")
+                            else:
+                                st.error(f"LLM error: {a2.get('error')}")
+                        else:
+                            st.warning("กรุณาวาง JD ก่อนค่ะ")
+
+        st.download_button("⬇️ Download jobs_analyzed.json",
+                           data=json.dumps(results, ensure_ascii=False, indent=2),
+                           file_name="jobs_analyzed.json", mime="application/json")
