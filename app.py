@@ -552,7 +552,7 @@ def analyze_with_gemini(jd_text, retries=3):
     if not GEMINI_API_KEY:
         return {"error": "ไม่มี GEMINI_API_KEY ใน secrets"}
     url = ("https://generativelanguage.googleapis.com/v1beta/models/"
-           "gemini-2.5-flash:generateContent?key=" + GEMINI_API_KEY)
+           "gemini-2.0-flash:generateContent?key=" + GEMINI_API_KEY)
     prompt = ANALYSIS_PROMPT.format(profile=CANDIDATE_PROFILE, jd_text=jd_text[:5000])
 
     for attempt in range(retries):
