@@ -951,8 +951,8 @@ def analyze_with_llm(jd_text, retries=2):
     for key in ("job_title", "company_name", "work_location", "wfh_policy",
             "salary_min", "salary_max", "key_tech_stack", "industry",
             "website", "apply_url"):
-    if not result.get(key):
-        result[key] = job_facts.get(key) or result.get(key)
+        if not result.get(key):
+            result[key] = job_facts.get(key) or result.get(key)
 
     # normalize keys ให้ตรงกับ analysis_to_notion_dicts ที่ใช้อยู่
     result.setdefault("job_title",    job_facts.get("job_title", "Unknown"))
