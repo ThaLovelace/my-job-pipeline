@@ -270,7 +270,12 @@ def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_
     สร้างหรืออัปเดต row ใน Job Listing DB
     - ถ้ายังไม่มี URL นี้ → สร้างใหม่
     - ถ้ามีแล้ว → อัปเดตเฉพาะ field ที่ส่งมา
-    status_key: "consider" | "added" | "not_apply"
+    status_key: "consider" | "added" | "not_apply" | "fetch_error" | "llm_error"
+
+    Strategy: ลอง select ก่อน ถ้า Notion ตอบ validation_error (option ไม่มีใน DB)
+    จะ fallback เขียน status_name ลง Notes แทน เพื่อให้ row ออกจาก queue ได้เสมอ
+    (fetch_pending_listings กรองด้วย status field ว่าง — ถ้า Notes มีค่า status ไม่ออก queue
+     แต่ถ้า select set ไม่ได้ → row ยังวนกลับมา ดังนั้นต้องแน่ใจว่า select สำเร็จ)
     """
     if not JOB_LISTING_DB_ID:
         return None, "ไม่มี JOB_LISTING_DB_ID"
@@ -292,43 +297,79 @@ def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_
     except Exception:
         pass
 
-    # สร้าง properties payload
-    props = {
-        "Status": {"select": {"name": status_name}},
-    }
-    if job_title:
-        props["Name"] = {"title": [{"text": {"content": job_title[:200]}}]}
-    if company_name:
-        props["Company"] = {"rich_text": [{"text": {"content": company_name[:200]}}]}
-    if url:
-        props["URL"] = {"url": url}
-    if jd_raw:
-        # JD อาจยาวมาก — เก็บใน rich_text สูงสุด 2000 chars
-        props["JD"] = {"rich_text": [{"text": {"content": jd_raw[:2000]}}]}
-    if error_note:
-        # เก็บ error ไว้ใน notes ของ row
-        props["Notes"] = {"rich_text": [{"text": {"content": error_note[:500]}}]}
+    def _build_props(use_select=True):
+        props = {}
+        if use_select:
+            props["Status"] = {"select": {"name": status_name}}
+        if job_title:
+            props["Name"] = {"title": [{"text": {"content": job_title[:200]}}]}
+        if company_name:
+            props["Company"] = {"rich_text": [{"text": {"content": company_name[:200]}}]}
+        if url:
+            props["URL"] = {"url": url}
+        if jd_raw:
+            props["JD"] = {"rich_text": [{"text": {"content": jd_raw[:2000]}}]}
+        # รวม error_note กับ status_key ไว้ใน Notes เสมอ — เผื่อ select ล้มเหลว ยังมีบันทึกไว้
+        notes_parts = []
+        if status_key not in ("consider", "added", "not_apply"):
+            notes_parts.append(f"[{status_name}]")
+        if error_note:
+            notes_parts.append(error_note[:480])
+        if notes_parts:
+            props["Notes"] = {"rich_text": [{"text": {"content": " — ".join(notes_parts)[:500]}}]}
+        return props
 
-    try:
+    def _do_request(props):
         if existing_id:
-            res = requests.patch(
+            return requests.patch(
                 f"https://api.notion.com/v1/pages/{existing_id}",
                 headers=HEADERS,
                 json={"properties": props}
             )
         else:
-            # สร้างใหม่ — ต้องมี Name เสมอ ถ้าไม่มีให้ใช้ URL แทน
             if "Name" not in props:
                 props["Name"] = {"title": [{"text": {"content": (job_title or url)[:200]}}]}
-            res = requests.post(
+            return requests.post(
                 "https://api.notion.com/v1/pages",
                 headers=HEADERS,
                 json={"parent": {"database_id": JOB_LISTING_DB_ID}, "properties": props}
             )
+
+    try:
+        # ── รอบแรก: ลอง select ตามปกติ ──────────────────────
+        res = _do_request(_build_props(use_select=True))
         result = res.json()
         if "id" in result:
             return result["id"], None
-        return None, result.get("message", "unknown error")
+
+        notion_err = result.get("message", "unknown error")
+        notion_code = result.get("code", "")
+
+        # ── รอบสอง: ถ้า select option ไม่มีใน DB → fallback ──
+        # Notion คืน "Could not find option" หรือ validation_error
+        if "option" in notion_err.lower() or notion_code in ("validation_error", "invalid_request_url"):
+            props_no_select = _build_props(use_select=False)
+            # เขียน status ลง Notes แทน select เพื่อให้ row ออกจาก queue
+            existing_notes = props_no_select.get("Notes", {}).get("rich_text", [{}])[0].get("text", {}).get("content", "")
+            if f"[{status_name}]" not in existing_notes:
+                new_notes = f"[{status_name}] {existing_notes}".strip()[:500]
+                props_no_select["Notes"] = {"rich_text": [{"text": {"content": new_notes}}]}
+
+            # ⚠️ select ยังต้องเซตเพื่อออกจาก queue — ลอง option ที่รู้จักแน่ๆ แทน
+            # "Consider" น่าจะมีแน่นอนเพราะ row เดิมถูกสร้างมาจาก queue ที่มี status ว่าง
+            fallback_options = [o for o in _get_listing_status_options()
+                                if o.lower() not in ("", "no status", "no apply status")]
+            if fallback_options:
+                props_no_select["Status"] = {"select": {"name": fallback_options[-1]}}
+
+            res2 = _do_request(props_no_select)
+            result2 = res2.json()
+            if "id" in result2:
+                return result2["id"], f"select fallback used (original option '{status_name}' not in DB)"
+            return None, f"fallback also failed: {result2.get('message', 'unknown')} | original: {notion_err}"
+
+        return None, notion_err
+
     except Exception as e:
         return None, str(e)
 
@@ -1433,9 +1474,12 @@ with tab3:
                     if JOB_LISTING_DB_ID:
                         # ตั้ง status = "fetch_error" เพื่อให้ออกจาก queue ถาวร
                         # (fetch_pending_listings กรอง "no status" เท่านั้น → งานนี้จะไม่วนกลับมา)
-                        upsert_job_listing(url, status_key="fetch_error",
+                        _uid, _uerr = upsert_job_listing(url, status_key="fetch_error",
                                            error_note=f"Fetch failed: {fetch_err}")
-                        add_log(f"  📋 Listing: fetch_error (ออกจาก queue แล้ว — retry ได้ใส่ JD เองด้านล่าง)")
+                        if _uerr:
+                            add_log(f"  ⚠️ Listing update failed: {_uerr}")
+                        else:
+                            add_log(f"  📋 Listing: fetch_error (ออกจาก queue แล้ว — retry ได้ใส่ JD เองด้านล่าง)")
                     if i < len(jobs_to_run) - 1:
                         time.sleep(delay)
                     continue
@@ -1453,10 +1497,13 @@ with tab3:
                 results.append({"url": url, "name": name, "status": "error", "error": analysis["error"]})
                 if JOB_LISTING_DB_ID:
                     # ตั้ง status = "llm_error" เพื่อออกจาก queue ถาวร
-                    upsert_job_listing(url, status_key="llm_error",
+                    _uid, _uerr = upsert_job_listing(url, status_key="llm_error",
                                        jd_raw=jd[:2000] if 'jd' in dir() else "",
                                        error_note=f"LLM error: {analysis.get('error','')}")
-                    add_log(f"  📋 Listing: llm_error (ออกจาก queue แล้ว)")
+                    if _uerr:
+                        add_log(f"  ⚠️ Listing update failed: {_uerr}")
+                    else:
+                        add_log(f"  📋 Listing: llm_error (ออกจาก queue แล้ว)")
             else:
                 jt = analysis.get("job_title", "?")
                 cn = analysis.get("company_name", "?")
