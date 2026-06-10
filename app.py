@@ -204,13 +204,10 @@ def create_job(d, company_page_id, opt):
         if v:
             props[field] = {"select": {"name": v}}
 
-    # URL fields — skip ถ้าว่าง
-    if d.get("linkedin_url"):
-        props["LinkedIn URL"] = {"url": d["linkedin_url"]}
-    if d.get("job_url"):
-        props["Job URL"]   = {"url": d["job_url"]}
-    if d.get("apply_url"):
-        props["Apply URL"] = {"url": d["apply_url"]}
+    # ── แก้ไขจุดนี้: ยุบรวมเหลือแค่คอลัมน์ "๋Job URL" ตามโครงสร้าง Notion ของคุณหนู ──
+    url_to_save = d.get("job_url") or d.get("linkedin_url")
+    if url_to_save:
+        props["๋Job URL"] = {"url": url_to_save}
 
     children = []
     if d.get("analysis"):
@@ -373,6 +370,7 @@ with tab1:
 
 
 # --- TAB 2 ---
+# --- TAB 2 ---
 with tab2:
     st.subheader("📋 Job Info")
     col1, col2 = st.columns(2)
@@ -385,10 +383,9 @@ with tab2:
         work_location = st.text_input("Work Location", placeholder="Bangkok, On-site")
         salary_min    = st.number_input("Salary Min (฿)", min_value=0, step=1000, value=0)
         salary_max    = st.number_input("Salary Max (฿)", min_value=0, step=1000, value=0)
-        linkedin_url  = st.text_input("LinkedIn URL", placeholder="https://linkedin.com/...")
 
+    # ปรับเหลือแค่ช่อง Job URL ช่องเดียวแมปกับ Notion
     job_url       = st.text_input("Job URL", placeholder="https://th.jobsdb.com/job/...")
-    apply_url     = st.text_input("Apply URL (ลิงค์สมัครโดยตรง)", placeholder="https://...")
     key_tech_stack = st.text_input("Key Tech Stack", placeholder="SQL, Python, Tableau")
     gaps          = st.text_area("Gaps to Address", placeholder="สิ่งที่ขาด / ต้องเตรียม", height=80)
     job_notes     = st.text_area("Job Notes", placeholder="หมายเหตุเพิ่มเติม", height=80)
@@ -419,9 +416,7 @@ with tab2:
             "work_location":  work_location,
             "salary_min":     salary_min if salary_min > 0 else None,
             "salary_max":     salary_max if salary_max > 0 else None,
-            "linkedin_url":   linkedin_url,
             "job_url":        job_url,
-            "apply_url":      apply_url,
             "key_tech_stack": key_tech_stack,
             "gaps":           gaps,
             "notes":          job_notes,
@@ -699,8 +694,7 @@ def analysis_to_notion_dicts(a, job_url):
     if a.get("resume_version"):
         parts.append(f"\n--- RESUME ---\nใช้: {a['resume_version']}\nเหตุผล: {a.get('resume_reason','')}")
 
-    apply_url = a.get("apply_url", "").strip() or job_url
-
+    # ปรับเหลือแค่ job_url หลักชิ้นเดียว
     job_data = {
         "job_title":      a.get("job_title", "Unknown"),
         "role_tier":      a.get("role_tier", ""),
@@ -710,8 +704,6 @@ def analysis_to_notion_dicts(a, job_url):
         "salary_min":     a.get("salary_min") or None,
         "salary_max":     a.get("salary_max") or None,
         "job_url":        job_url,
-        "apply_url":      apply_url,
-        "linkedin_url":   job_url if "linkedin.com" in job_url else "",
         "key_tech_stack": a.get("key_tech_stack", ""),
         "gaps":           a.get("gaps", ""),
         "notes":          a.get("notes", ""),
