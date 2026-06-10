@@ -532,43 +532,8 @@ def _extract_text_from_html(html, url):
     return ""
 
 
-def _fetch_with_playwright(url):
-    """Layer 1: Playwright — รัน JS จริงเหมือน browser"""
-    try:
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-            page = browser.new_page(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                )
-            )
-            page.goto(url, wait_until="networkidle", timeout=30000)
-            # รอ content โหลด
-            try:
-                page.wait_for_selector(
-                    "div[data-automation='jobAdDetails'], "
-                    "div.job-detail, article, main",
-                    timeout=10000
-                )
-            except Exception:
-                pass
-            html = page.content()
-            browser.close()
-        text = _extract_text_from_html(html, url)
-        if len(text.strip()) >= 100:
-            return text, None
-        return None, "Playwright: content น้อยเกินไป"
-    except ImportError:
-        return None, "Playwright: ไม่ได้ install"
-    except Exception as e:
-        return None, f"Playwright error: {e}"
-
-
 def _fetch_with_scraperapi(url):
-    """Layer 2: ScraperAPI — bypass anti-bot ผ่าน proxy"""
+    """Layer 1: ScraperAPI — bypass anti-bot ผ่าน proxy"""
     if not SCRAPERAPI_KEY:
         return None, "ScraperAPI: ไม่มี key"
     try:
@@ -589,7 +554,7 @@ def _fetch_with_scraperapi(url):
 
 
 def _fetch_with_requests(url):
-    """Layer 3: requests ธรรมดา — fallback สุดท้าย"""
+    """Layer 2: requests ธรรมดา — fallback สุดท้าย"""
     hdrs = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -613,9 +578,9 @@ def _fetch_with_requests(url):
     except requests.exceptions.HTTPError as e:
         status = e.response.status_code if e.response is not None else "?"
         if status == 403:
-            return None, f"403 Forbidden"
+            return None, "403 Forbidden"
         if status == 404:
-            return None, f"404 Not Found — URL อาจหมดอายุแล้ว"
+            return None, "404 Not Found — URL อาจหมดอายุแล้ว"
         return None, f"HTTP {status}: {e}"
     except Exception as e:
         return None, f"requests error: {e}"
@@ -624,20 +589,15 @@ def _fetch_with_requests(url):
 def fetch_jd(url):
     """
     Returns (content, error_message). error_message is None on success.
-    ลำดับ: Playwright → ScraperAPI → requests
+    ลำดับ: ScraperAPI → requests ธรรมดา
     """
     if "facebook.com" in url:
         return None, "Facebook URL — กรุณา copy JD มาวางเองค่ะ"
     if "linkedin.com" in url:
         return None, "LinkedIn URL — กรุณา copy JD มาวางเองค่ะ"
 
-    layers = [
-        ("Playwright", _fetch_with_playwright),
-        ("ScraperAPI", _fetch_with_scraperapi),
-        ("requests",   _fetch_with_requests),
-    ]
     errors = []
-    for name, fn in layers:
+    for name, fn in [("ScraperAPI", _fetch_with_scraperapi), ("requests", _fetch_with_requests)]:
         text, err = fn(url)
         if text:
             return text, None
