@@ -358,12 +358,13 @@ def get_listing_status_map():
     """คืน dict mapping ชื่อ canonical → ชื่อจริงใน Notion (fuzzy)"""
     options = _get_listing_status_options()
     return {
+        # สถานะปกติ
         "consider":    fuzzy_match("Consider",    options, cutoff=0.5) or "Consider",
         "added":       fuzzy_match("Added",        options, cutoff=0.5) or "Added",
-        "not_apply":   fuzzy_match("Not Apply",    options, cutoff=0.5) or "Not Apply",
-        # error states — ออกจาก queue (status ไม่ว่าง) แต่ไม่ใช่ผลสำเร็จ
+        # error states — ออกจาก queue แต่ยังไม่เสร็จ
         "fetch_error": fuzzy_match("Fetch Error",  options, cutoff=0.5) or "Fetch Error",
         "llm_error":   fuzzy_match("LLM Error",    options, cutoff=0.5) or "LLM Error",
+        # not_apply ถูกลบออก — ทุก job ที่ push Notion สำเร็จใช้ "added" เสมอ
     }
 
 def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_key="consider", error_note=""):
@@ -442,10 +443,10 @@ def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_
                 "paragraph": {"rich_text": [{"text": {"content": chunk}}]}
             })
 
-    # Notes (error + status label สำหรับ error states)
+    # Notes — เขียนเฉพาะ error states เพื่อบอกสาเหตุ
     notes_prop = pmap.get("notes")
     notes_parts = []
-    if status_key not in ("consider", "added", "not_apply"):
+    if status_key not in ("consider", "added"):
         notes_parts.append(f"[{status_name}]")
     if error_note:
         notes_parts.append(error_note[:460])
@@ -1583,7 +1584,7 @@ with tab3:
                 payload["start_cursor"] = data["next_cursor"]
 
             # สถานะที่ "เสร็จแล้ว" หรือ URL ใช้ไม่ได้ถาวร → ข้ามถาวร
-            DONE_STATUSES = {"consider", "added", "not_apply", "fetch_error"}
+            DONE_STATUSES = {"consider", "added", "fetch_error"}
             # สถานะที่ "ว่าง" → ถือว่า pending ใหม่
             EMPTY_STATUS_VALUES = {"", "no status", "no apply status", "none", "-"}
             # llm_error → retry ได้ (JD ดึงมาได้แล้ว แต่ LLM พัง)
@@ -1804,19 +1805,16 @@ with tab3:
                     if not j_data.get("job_title", "").strip():
                         raise ValueError("no job title")
                     cname = c_data.get("company_name", "").strip()
-                    # ถ้าชื่อบริษัทไม่ชัดเจน → ใช้ชื่อ fallback แทน ไม่ block push
+                    # ถ้าชื่อบริษัทไม่ชัดเจน → ลอง extract จาก URL ก่อน
                     if not cname or cname.lower() in ("not specified", "unknown", ""):
-                        # พยายาม extract จาก URL ก่อน (เช่น careers.shopee.co.th → Shopee)
                         url_company = _company_from_url(url)
                         if url_company:
                             cname = url_company
                             c_data["company_name"] = cname
                             add_log(f"  🔎 Company from URL: {cname}")
                         else:
-                            # fallback สุดท้าย: ใช้ชื่อตำแหน่งเป็น label เพื่อไม่ให้หาย
-                            cname = f"[Unknown] {j_data.get('job_title','?')[:40]}"
-                            c_data["company_name"] = cname
-                            add_log(f"  ⚠️ Company name unknown — ใช้ fallback: {cname}")
+                            # ยังไม่ได้ชื่อบริษัทเลย → ไม่ push, ตั้ง fetch_error
+                            raise ValueError(f"ไม่ทราบชื่อบริษัท — ไม่ push Notion (แก้ใน Listing แล้วลอง retry)")
                     company_id, found = search_company(cname)
                     if not found or not company_id:
                         company_id, cerr = create_company(c_data, opt)
@@ -1828,16 +1826,22 @@ with tab3:
                     add_log(f"  ✅ Notion OK")
                     stats["notion_ok"] += 1
 
-                    # อัปเดต Listing สถานะสุดท้าย
+                    # อัปเดต Listing → "added" เสมอ ไม่ว่า AI จะตัดสิน APPLY/WATCHLIST/PASS
+                    # (สถานะใน Job Pipeline DB ต่างหากที่บอกว่า To Apply / On Hold / Pass)
                     if JOB_LISTING_DB_ID:
-                        lst = "added" if decision == "APPLY" else "not_apply"
-                        upsert_job_listing(url, status_key=lst)
-                        add_log(f"  📋 Listing: {'Added ✅' if lst == 'added' else 'Not Apply ❌'}")
+                        upsert_job_listing(url, status_key="added")
+                        add_log(f"  📋 Listing: Added ✅")
 
                 except Exception as e:
                     add_log(f"  ❌ Notion error: {e}")
                     stats["notion_err"] += 1
-                    add_log(f"  📋 Listing: คง Consider ไว้ (ยังค้าง)")
+                    # ถ้าเป็น error เรื่องชื่อบริษัท → ตั้ง fetch_error ไม่ใช่ค้าง consider
+                    if JOB_LISTING_DB_ID and "ไม่ทราบชื่อบริษัท" in str(e):
+                        upsert_job_listing(url, status_key="fetch_error",
+                                           error_note=f"Company name unknown: {str(e)[:200]}")
+                        add_log(f"  📋 Listing: fetch_error (ไม่ทราบชื่อบริษัท)")
+                    else:
+                        add_log(f"  📋 Listing: คง Consider ไว้ (Notion error — retry ได้)")
 
                 results.append(result_entry)
 
@@ -1912,9 +1916,9 @@ with tab3:
                                         cn2_from_url = _company_from_url(fr["url"])
                                         if cn2_from_url:
                                             cn2 = cn2_from_url
+                                            c2["company_name"] = cn2
                                         else:
-                                            cn2 = f"[Unknown] {j2.get('job_title','?')[:40]}"
-                                        c2["company_name"] = cn2
+                                            raise ValueError("ไม่ทราบชื่อบริษัท — กรุณาระบุในช่อง JD หรือแก้ใน Listing")
                                     cid, f2 = search_company(cn2)
                                     if not f2 or not cid:
                                         cid, cerr2 = create_company(c2, opt)
@@ -1923,9 +1927,8 @@ with tab3:
                                     if ok2:
                                         st.success("📤 Push Notion สำเร็จค่ะ!")
                                         if JOB_LISTING_DB_ID:
-                                            d2 = a2.get("apply_decision","").upper()
-                                            upsert_job_listing(fr["url"],
-                                                status_key="added" if d2 == "APPLY" else "not_apply")
+                                            # ทุก job ที่ push สำเร็จ → "added" เสมอ
+                                            upsert_job_listing(fr["url"], status_key="added")
                                     else:
                                         st.error(f"Notion error: {jerr2}")
                                 except Exception as ex:
