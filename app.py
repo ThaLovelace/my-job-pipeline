@@ -219,6 +219,187 @@ def create_company(d, opt):
         return None, result.get("message", "unknown error")
     return result["id"], None
 
+# ── Notion page-body block builders ──────────────────────
+
+def _text_chunks(text, size=1999):
+    """แบ่ง text เป็น chunks ตาม Notion rich_text limit (2000 chars/block)"""
+    text = (text or "").strip()
+    return [text[i:i+size] for i in range(0, len(text), size)] or [""]
+
+def _paragraph_blocks(text, size=1999):
+    return [
+        {"object": "block", "type": "paragraph",
+         "paragraph": {"rich_text": [{"text": {"content": chunk}}]}}
+        for chunk in _text_chunks(text, size) if chunk.strip()
+    ]
+
+def _heading_block(text, level=2):
+    htype = f"heading_{level}"
+    return {"object": "block", "type": htype,
+            "heading_2" if level == 2 else htype: {"rich_text": [{"text": {"content": text}}]}} \
+        if level != 2 else \
+        {"object": "block", "type": "heading_2",
+         "heading_2": {"rich_text": [{"text": {"content": text}}]}}
+
+def _h2(text):
+    return {"object": "block", "type": "heading_2",
+            "heading_2": {"rich_text": [{"text": {"content": text}}]}}
+
+def _h3(text):
+    return {"object": "block", "type": "heading_3",
+            "heading_3": {"rich_text": [{"text": {"content": text}}]}}
+
+def _bullet(text):
+    return {"object": "block", "type": "bulleted_list_item",
+            "bulleted_list_item": {"rich_text": [{"text": {"content": text[:1999]}}]}}
+
+def _callout(text, emoji="💡"):
+    blocks_out = []
+    chunks = _text_chunks(text)
+    blocks_out.append({
+        "object": "block", "type": "callout",
+        "callout": {
+            "rich_text": [{"text": {"content": chunks[0]}}],
+            "icon": {"type": "emoji", "emoji": emoji},
+        }
+    })
+    return blocks_out
+
+def _toggle(title, children_blocks):
+    """toggle block พร้อม children (รองรับใน create page ได้สูงสุด ~2 ชั้น)"""
+    return {
+        "object": "block", "type": "toggle",
+        "toggle": {
+            "rich_text": [{"text": {"content": title[:1999]}}],
+            "children": children_blocks,
+        }
+    }
+
+def _divider():
+    return {"object": "block", "type": "divider", "divider": {}}
+
+
+# ── เรื่องวิเคราะห์ — แยก narrative_analysis เป็นย่อหน้าตาม [1]..[7] ─────
+_NARRATIVE_SPLIT_RE = re.compile(r"(?=\[\d+\])")
+
+def _narrative_blocks(narrative_text):
+    if not narrative_text:
+        return []
+    sections = [s.strip() for s in _NARRATIVE_SPLIT_RE.split(narrative_text) if s.strip()]
+    blocks_out = []
+    if len(sections) > 1:
+        for sec in sections:
+            blocks_out.extend(_paragraph_blocks(sec))
+    else:
+        blocks_out.extend(_paragraph_blocks(narrative_text))
+    return blocks_out
+
+
+def build_analysis_blocks(a, max_blocks=95):
+    """
+    สร้าง Notion page body blocks จาก raw analysis dict (a) — จัด layout สวยงาม:
+      📊 AI Analysis (narrative, แยกตาม [1]-[7])
+      🎯 Interview Prep — toggle ต่อคำถาม + answer guide ข้างใน, ถามกลับ (bullets), salary script (callout)
+      📋 Application Guide — how to apply, form questions, things to prepare (bullets)
+      📄 Resume — version + เหตุผล (callout)
+
+    max_blocks: Notion API จำกัด children ต่อ request ที่ ~100 blocks — เผื่อ headroom
+    """
+    blocks = []
+
+    # ── AI Analysis ──────────────────────────────────────────
+    narrative = a.get("narrative_analysis", "")
+    if narrative:
+        blocks.append(_h2("📊 AI Analysis"))
+        blocks.extend(_narrative_blocks(narrative))
+        blocks.append(_divider())
+
+    # ── Interview Prep ───────────────────────────────────────
+    ip = a.get("interview_prep") or {}
+    if ip:
+        blocks.append(_h2("🎯 Interview Prep"))
+
+        behavioral = ip.get("behavioral_questions") or []
+        if behavioral:
+            blocks.append(_h3("Behavioral Questions"))
+            for q in behavioral:
+                question = (q.get("question") or "").strip()
+                answer = (q.get("answer_guide") or "").strip()
+                if question:
+                    blocks.append(_toggle(f"❓ {question}", _paragraph_blocks(answer) or [_paragraph_blocks(" ")[0]]))
+
+        technical = ip.get("technical_questions") or []
+        if technical:
+            blocks.append(_h3("Technical Questions"))
+            for q in technical:
+                question = (q.get("question") or "").strip()
+                answer = (q.get("answer_guide") or "").strip()
+                if question:
+                    blocks.append(_toggle(f"❓ {question}", _paragraph_blocks(answer) or [_paragraph_blocks(" ")[0]]))
+
+        questions_to_ask = ip.get("questions_to_ask") or []
+        if questions_to_ask:
+            blocks.append(_h3("คำถามถามกลับ Employer"))
+            for q in questions_to_ask:
+                if q and q.strip():
+                    blocks.append(_bullet(q.strip()))
+
+        salary_script = (ip.get("salary_negotiation_script") or "").strip()
+        if salary_script:
+            blocks.append(_h3("💰 Salary Negotiation Script"))
+            blocks.extend(_callout(salary_script, emoji="💰"))
+            # ถ้ายาวกว่า 1 chunk ให้เติม paragraph ต่อ
+            chunks = _text_chunks(salary_script)
+            if len(chunks) > 1:
+                for chunk in chunks[1:]:
+                    blocks.extend(_paragraph_blocks(chunk))
+
+        blocks.append(_divider())
+
+    # ── Application Guide ────────────────────────────────────
+    ag = a.get("application_guide") or {}
+    if ag:
+        blocks.append(_h2("📋 Application Guide"))
+
+        how_to_apply = (ag.get("how_to_apply") or "").strip()
+        if how_to_apply:
+            blocks.append(_h3("วิธี Apply"))
+            blocks.extend(_paragraph_blocks(how_to_apply))
+
+        form_qs = ag.get("form_questions_to_prepare") or []
+        if form_qs:
+            blocks.append(_h3("คำถามในฟอร์ม / Screening"))
+            for q in form_qs:
+                if q and q.strip():
+                    blocks.append(_bullet(q.strip()))
+
+        prep = ag.get("things_to_prepare") or []
+        if prep:
+            blocks.append(_h3("สิ่งที่ต้องเตรียม"))
+            for item in prep:
+                if item and item.strip():
+                    blocks.append(_bullet(item.strip()))
+
+        blocks.append(_divider())
+
+    # ── Resume Version ────────────────────────────────────────
+    resume_version = (a.get("resume_version") or "").strip()
+    if resume_version:
+        blocks.append(_h2("📄 Resume Version"))
+        resume_text = f"ใช้: {resume_version}"
+        reason = (a.get("resume_reason") or "").strip()
+        if reason:
+            resume_text += f"\nเหตุผล: {reason}"
+        blocks.extend(_callout(resume_text, emoji="📄"))
+
+    # ── Safety cap: Notion จำกัด children ต่อ request ──────────
+    if len(blocks) > max_blocks:
+        blocks = blocks[:max_blocks]
+        blocks.append(_paragraph_blocks("…(เนื้อหาบางส่วนถูกตัด — ดูฉบับเต็มใน analysis text เดิม)")[0])
+
+    return blocks
+
+
 def create_job(d, company_page_id, opt):
     def sel(raw, choices):
         v = sanitize_select(fuzzy_match(raw, choices))
