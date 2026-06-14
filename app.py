@@ -243,6 +243,14 @@ def create_job(d, company_page_id, opt):
     if url_to_save:
         props["๋Job URL"] = {"url": url_to_save}
 
+    # ── Score fields (บันทึกเสมอ ถ้ามีค่า) ────────────────────
+    if d.get("ai_depth_score") is not None:
+        props["AI Depth Score"] = {"number": d["ai_depth_score"]}
+    if d.get("ownership_score") is not None:
+        props["Ownership Score"] = {"number": d["ownership_score"]}
+    if d.get("skill_match_pct") is not None:
+        props["Skill Match %"] = {"number": d["skill_match_pct"]}
+
     children = []
     if d.get("analysis"):
         children.append({
@@ -563,11 +571,24 @@ def rerank_all_jobs(opt, log_fn):
         props = job["properties"]
         fit   = props.get("Fit Level", {}).get("select") or {}
         fit_s = FIT_SCORE.get(fit.get("name", "").lower(), 0)
-        # ดึง ai_depth และ ownership จาก Notes (ถ้ามี) — fallback 0
-        # score รวม: fit*3 (น้ำหนักหลัก) ให้ APPLY > WATCHLIST > PASS
-        apply_status = props.get("Apply Status", {}).get("select") or {}
-        apply_bonus = {"apply": 2, "to apply": 1}.get(apply_status.get("name", "").lower(), 0)
-        return -(fit_s * 3 + apply_bonus)
+
+        ai_depth  = (props.get("AI Depth Score", {}).get("number") or 0)
+        ownership = (props.get("Ownership Score", {}).get("number") or 0)
+        skill_match = (props.get("Skill Match %", {}).get("number") or 0)
+
+        # Company Tier: extract number from "Tier1/Tier2/Tier3" or "Level1/Level2/Level3"
+        import re as _re
+        role_tier_raw = (props.get("Role Tier", {}).get("select") or {}).get("name", "")
+        tier_m = _re.search(r"[123]", role_tier_raw)
+        company_tier_val = (4 - int(tier_m.group())) if tier_m else 0  # Tier1=3, Tier2=2, Tier3=1
+
+        # Salary penalty: ถ้า salary_max < 80000 หัก 1 คะแนน
+        salary_max = props.get("Salary Max", {}).get("number") or 0
+        salary_penalty = 1 if (salary_max > 0 and salary_max < 80000) else 0
+
+        # Formula: fit×3 + ai_depth×2 + ownership×2 + company_tier×1 + skill_match/20 - salary_penalty
+        score = (fit_s * 3) + (ai_depth * 2) + (ownership * 2) + company_tier_val + (skill_match / 20) - salary_penalty
+        return -score  # negative for ascending sort
 
     jobs_sorted = sorted(jobs, key=job_score)
     for rank, job in enumerate(jobs_sorted, start=1):
@@ -871,7 +892,8 @@ apply_decision logic:
 {{
   "job_title": "ชื่อตำแหน่งจาก JD",
   "company_name": "ชื่อบริษัท",
-  "role_tier": "Tier1/2/3 — เหตุผล 1 ประโยค",
+  "role_tier": "Tier1/Tier2/Tier3",
+  "role_tier_reason": "เหตุผล 1 ประโยคว่าทำไมถึงเป็น Tier นี้",
   "fit_level": "high/medium-high/medium/low-medium/low",
   "work_location": "เมือง/ย่าน",
   "wfh_policy": "WFH Available/Hybrid/On-site/Unknown",
@@ -889,7 +911,8 @@ apply_decision logic:
   "apply_decision": "APPLY/WATCHLIST/PASS",
   "apply_url": "ลิงค์สมัครโดยตรงจาก JD ถ้าไม่มีให้ใส่ค่าว่าง",
   "company_size": "startup/sme/enterprise",
-  "company_tier": "Level1/2/3 — เหตุผลสั้นๆ",
+  "company_tier": "Level1/Level2/Level3",
+  "company_tier_reason": "เหตุผลสั้นๆ",
   "industry": "อุตสาหกรรม",
   "location": "Bangkok, Thailand",
   "website": "",
@@ -1229,7 +1252,8 @@ apply_decision:
 ตอบกลับเป็น JSON เท่านั้น ห้ามมี markdown backticks:
 
 {{
-  "role_tier": "Tier1/2/3 — เหตุผล 1 ประโยค",
+  "role_tier": "Tier1/Tier2/Tier3",
+  "role_tier_reason": "เหตุผล 1 ประโยคว่าทำไมถึงเป็น Tier นี้",
   "fit_level": "high/medium-high/medium/low-medium/low",
   "my_skill_match_pct": 75,
   "ai_depth_score": 3,
@@ -1238,7 +1262,8 @@ apply_decision:
   "resume_version": "VERSION A/B/RHENUS/THINKNET/ACCENTURE/FLOWACCOUNT",
   "resume_reason": "เหตุผล 1-2 ประโยค",
   "apply_decision": "APPLY/WATCHLIST/PASS",
-  "company_tier": "Level1/2/3 — เหตุผลสั้นๆ",
+  "company_tier": "Level1/Level2/Level3",
+  "company_tier_reason": "เหตุผลสั้นๆ",
   "location": "Bangkok, Thailand",
   "gaps": "gap หลัก max 80 chars",
   "notes": "สิ่งที่ต้องรู้ก่อน apply max 100 chars",
@@ -1500,24 +1525,46 @@ def analysis_to_notion_dicts(a, job_url):
     if a.get("resume_version"):
         parts.append(f"\n--- RESUME ---\nใช้: {a['resume_version']}\nเหตุผล: {a.get('resume_reason','')}")
 
+    # ── clean role_tier: เอาแค่ Tier1/Tier2/Tier3 ──────────────
+    import re as _re
+    raw_tier = a.get("role_tier", "")
+    tier_reason = a.get("role_tier_reason", "")
+    tier_match = _re.search(r"(Tier\s*[123])", raw_tier, _re.IGNORECASE)
+    if tier_match:
+        clean_tier = tier_match.group(1).replace(" ", "")
+        if not tier_reason:
+            leftover = _re.sub(r"Tier\s*[123]\s*[—\-–]?\s*", "", raw_tier).strip()
+            if leftover:
+                tier_reason = leftover
+    else:
+        clean_tier = raw_tier
+
+    # merge tier_reason เข้า notes
+    base_notes = a.get("notes", "")
+    notes_parts_list = [p for p in [base_notes, tier_reason] if p]
+    merged_notes = " | ".join(notes_parts_list)[:500]
+
     # ปรับเหลือแค่ job_url หลักชิ้นเดียว
     job_data = {
-        "job_title":      a.get("job_title", "Unknown"),
-        "role_tier":      a.get("role_tier", ""),
-        "fit_level":      a.get("fit_level", "medium"),
-        "apply_status":   {
+        "job_title":       a.get("job_title", "Unknown"),
+        "role_tier":       clean_tier,
+        "fit_level":       a.get("fit_level", "medium"),
+        "apply_status":    {
             "APPLY":     "To Apply",
             "WATCHLIST": "On Hold",
             "PASS":      "❌ Pass ไม่เอา",
         }.get(a.get("apply_decision", "").upper(), "No Apply Status"),
-        "work_location":  a.get("work_location", ""),
-        "salary_min":     a.get("salary_min") or None,
-        "salary_max":     a.get("salary_max") or None,
-        "job_url":        job_url,
-        "key_tech_stack": a.get("key_tech_stack", ""),
-        "gaps":           a.get("gaps", ""),
-        "notes":          a.get("notes", ""),
-        "analysis":       "\n\n".join(parts),
+        "work_location":   a.get("work_location", ""),
+        "salary_min":      a.get("salary_min") or None,
+        "salary_max":      a.get("salary_max") or None,
+        "job_url":         job_url,
+        "key_tech_stack":  a.get("key_tech_stack", ""),
+        "gaps":            a.get("gaps", ""),
+        "notes":           merged_notes,
+        "analysis":        "\n\n".join(parts),
+        "ai_depth_score":  a.get("ai_depth_score") or None,
+        "ownership_score": a.get("ownership_score") or None,
+        "skill_match_pct": a.get("my_skill_match_pct") or None,
     }
     company_data = {
         "company_name": a.get("company_name", "Unknown"),
