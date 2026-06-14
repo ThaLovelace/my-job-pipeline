@@ -78,6 +78,14 @@ FIT_SCORE = {
     "medium": 3, "low-medium": 2, "low medium": 2, "low": 1
 }
 
+# apply_decision (จาก LLM) → status_key สำหรับ Job Listing DB
+# ให้ตรงกับ Apply Status ใน Job Pipeline DB (To Apply / On Hold / Pass)
+APPLY_DECISION_TO_LISTING_STATUS = {
+    "APPLY":     "to_apply",
+    "WATCHLIST": "on_hold",
+    "PASS":      "pass",
+}
+
 # ── helpers ──────────────────────────────────────────────
 
 def sanitize_select(value):
@@ -371,12 +379,15 @@ def get_listing_status_map():
     return {
         # สถานะปกติ
         "consider":    fuzzy_match("Consider",    options, cutoff=0.5) or "Consider",
-        "added":       fuzzy_match("Added",        options, cutoff=0.5) or "Added",
+        # สถานะ "เสร็จแล้ว" — แยกตามผลตัดสินของ Job Pipeline (To Apply / On Hold / Pass)
+        # ใช้ชื่อเดียวกับ Apply Status ใน Job Pipeline DB เพื่อให้ดูสถานะตรงกันทั้ง 2 DB
+        "to_apply":    fuzzy_match("To Apply",    options, cutoff=0.5) or "To Apply",
+        "on_hold":     fuzzy_match("On Hold",     options, cutoff=0.5) or "On Hold",
+        "pass":        fuzzy_match("Pass",        options, cutoff=0.5) or "❌ Pass ไม่เอา",
         # error states — ออกจาก queue แต่ยังไม่เสร็จ
         "fetch_error":  fuzzy_match("Fetch Error",   options, cutoff=0.5) or "Fetch Error",
         "llm_error":    fuzzy_match("LLM Error",     options, cutoff=0.5) or "LLM Error",
         "need_company": fuzzy_match("Need Company",  options, cutoff=0.5) or "Need Company",
-        # not_apply ถูกลบออก — ทุก job ที่ push Notion สำเร็จใช้ "added" เสมอ
     }
 
 def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_key="consider", error_note=""):
@@ -463,7 +474,7 @@ def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_
     # Notes — เขียนเฉพาะ error states เพื่อบอกสาเหตุ
     notes_prop = pmap.get("notes")
     notes_parts = []
-    if status_key not in ("consider", "added"):
+    if status_key not in ("consider", "to_apply", "on_hold", "pass"):
         notes_parts.append(f"[{status_name}]")
     if error_note:
         notes_parts.append(error_note[:460])
@@ -514,6 +525,34 @@ def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_
 
     except Exception as e:
         return None, str(e)
+
+
+def _get_page_body_text(page_id, max_chars=6000):
+    """
+    ดึงข้อความจาก page body (blocks) — ใช้เป็น fallback เมื่อ property "JD" ว่าง
+    แต่ผู้ใช้แปะ JD ไว้ในหน้า page เอง (paragraph/heading blocks)
+    """
+    try:
+        text_parts = []
+        url = f"https://api.notion.com/v1/blocks/{page_id}/children"
+        params = {"page_size": 100}
+        while True:
+            res = requests.get(url, headers=HEADERS, params=params)
+            data = res.json()
+            for b in data.get("results", []):
+                btype = b.get("type", "")
+                content = b.get(btype, {})
+                rich = content.get("rich_text", [])
+                if rich:
+                    line = "".join(rt.get("plain_text", "") for rt in rich)
+                    if line.strip():
+                        text_parts.append(line)
+            if not data.get("has_more"):
+                break
+            params["start_cursor"] = data["next_cursor"]
+        return "\n".join(text_parts)[:max_chars]
+    except Exception:
+        return ""
 
 
 def _replace_page_blocks(page_id, new_blocks):
@@ -673,11 +712,15 @@ tab1, tab2, tab3 = st.tabs(["📝 Paste Python Dict (Fast)", "✍️ Manual Form
 
 # --- TAB 1 ---
 with tab1:
-    st.markdown("วางโค้ด `job_data` และ `company_data` ลงในช่องด้านล่างแล้วกด Submit ได้เลยค่ะ")
+    st.markdown(
+        "วางได้ 2 แบบค่ะ:\n"
+        "- **ผลลัพธ์ AI analysis (JSON)** ทั้งก้อน — ระบบจะแปลงเป็น job_data/company_data ให้อัตโนมัติ\n"
+        "- **Python dict** ที่มีตัวแปร `job_data` และ `company_data`"
+    )
     raw_code = st.text_area(
         "Paste Code Here",
         height=450,
-        placeholder="job_data = {\n  'job_title': '...', \n  ...\n}\n\ncompany_data = {\n  ...\n}",
+        placeholder='วาง JSON ผลลัพธ์ AI analysis ทั้งก้อน หรือ\n\njob_data = {\n  "job_title": "...", \n  ...\n}\n\ncompany_data = {\n  ...\n}',
         label_visibility="collapsed"
     )
 
@@ -685,17 +728,43 @@ with tab1:
         if not raw_code.strip():
             st.error("กรุณาวางโค้ดก่อนค่ะ")
             st.stop()
-        local_vars = {}
+
+        j_data, c_data = None, None
+        text = raw_code.strip()
+
+        # ── ลอง 1: แปะมาเป็น JSON (ผลลัพธ์ AI analysis ทั้งก้อน หรือ {job_data, company_data}) ──
         try:
-            exec(raw_code, {}, local_vars)
-            j_data = local_vars.get("job_data")
-            c_data = local_vars.get("company_data")
-            if not isinstance(j_data, dict) or not isinstance(c_data, dict):
-                st.error("❌ โค้ดไม่ถูกต้อง: ต้องมีตัวแปร `job_data` และ `company_data` ที่เป็นรูปแบบ Dictionary ค่ะ")
+            cleaned = re.sub(r"^```(?:json)?\s*", "", text)
+            cleaned = re.sub(r"```\s*$", "", cleaned).strip()
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, dict):
+                if "job_data" in parsed and "company_data" in parsed:
+                    # รูปแบบ {"job_data": {...}, "company_data": {...}}
+                    j_data, c_data = parsed["job_data"], parsed["company_data"]
+                elif "job_title" in parsed or "narrative_analysis" in parsed:
+                    # ผลลัพธ์ AI analysis ดิบ — แปลงด้วย analysis_to_notion_dicts
+                    job_url = parsed.get("apply_url") or parsed.get("job_url", "")
+                    j_data, c_data = analysis_to_notion_dicts(parsed, job_url)
+        except json.JSONDecodeError:
+            pass
+
+        # ── ลอง 2: ถ้ายังไม่ได้ → ลองรันเป็น Python dict (job_data = {...}; company_data = {...}) ──
+        if j_data is None or c_data is None:
+            local_vars = {}
+            try:
+                exec(text, {}, local_vars)
+                j_data = local_vars.get("job_data")
+                c_data = local_vars.get("company_data")
+            except Exception as e:
+                st.error(f"❌ เกิดข้อผิดพลาดในการอ่านโค้ด: {e}")
                 st.stop()
-            submit_to_notion(j_data, c_data)
-        except Exception as e:
-            st.error(f"❌ เกิดข้อผิดพลาดในการอ่านโค้ด: {e}")
+
+        if not isinstance(j_data, dict) or not isinstance(c_data, dict):
+            st.error("❌ โค้ดไม่ถูกต้อง: ต้องเป็น JSON ผลลัพธ์ AI analysis, JSON ที่มี job_data/company_data, "
+                     "หรือ Python dict ที่มีตัวแปร `job_data` และ `company_data` ค่ะ")
+            st.stop()
+
+        submit_to_notion(j_data, c_data)
 
 
 # --- TAB 2 ---
@@ -1708,8 +1777,9 @@ with tab3:
                 payload["start_cursor"] = data["next_cursor"]
 
             # สถานะที่ "เสร็จแล้ว" หรือ ต้องรอแก้ไขด้วยมือก่อน → ข้ามถาวร (auto-queue ไม่หยิบ)
+            # to_apply / on_hold / pass: push เข้า Job Pipeline สำเร็จแล้ว ผลตัดสินคือ APPLY/WATCHLIST/PASS
             # need_company: รอผู้ใช้กรอกชื่อบริษัทใน Notion แล้วเปลี่ยนเป็น llm_error เพื่อ retry เอง
-            DONE_STATUSES = {"added", "fetch_error", "need_company"}
+            DONE_STATUSES = {"to_apply", "on_hold", "pass", "fetch_error", "need_company"}
             # สถานะที่ "ว่าง" → ถือว่า pending ใหม่ (fetch + LLM ทุกขั้น)
             EMPTY_STATUS_VALUES = {"", "no status", "no apply status", "none", "-"}
             # สถานะที่ retry ได้ — skip fetch แต่ run LLM ใหม่
@@ -1757,6 +1827,11 @@ with tab3:
                 jp = props.get(jd_field, {})
                 jd_arr  = jp.get("rich_text", [])
                 jd_text = jd_arr[0].get("plain_text", "") if jd_arr else ""
+
+                # ── Fallback: ถ้า property "JD" ว่าง แต่ผู้ใช้แปะ JD ไว้ใน page body เอง ──
+                # (เกิดได้ทั้งกับ row ที่ upsert ก่อนแก้ field "JD", และ row ที่ผู้ใช้พิมพ์เอง)
+                if not jd_text.strip() and canonical_key in SKIP_FETCH_STATUSES:
+                    jd_text = _get_page_body_text(row["id"])
 
                 # ── Company (ถ้าผู้ใช้กรอกไว้เอง — ใช้ override การเดาของ LLM) ──
                 cp = props.get(company_field, {})
@@ -2011,11 +2086,15 @@ with tab3:
                     add_log(f"  ✅ Notion OK")
                     stats["notion_ok"] += 1
 
-                    # อัปเดต Listing → "added" เสมอ ไม่ว่า AI จะตัดสิน APPLY/WATCHLIST/PASS
-                    # (สถานะใน Job Pipeline DB ต่างหากที่บอกว่า To Apply / On Hold / Pass)
+                    # อัปเดต Listing → ตามผลตัดสินของ AI (To Apply / On Hold / Pass)
+                    # ให้ status ใน Job Listing DB ตรงกับ Apply Status ใน Job Pipeline DB
                     if JOB_LISTING_DB_ID:
-                        upsert_job_listing(url, status_key="added")
-                        add_log(f"  📋 Listing: Added ✅")
+                        decision_key = APPLY_DECISION_TO_LISTING_STATUS.get(
+                            analysis.get("apply_decision", "").upper(), "on_hold"
+                        )
+                        upsert_job_listing(url, status_key=decision_key)
+                        decision_label = {"to_apply": "To Apply", "on_hold": "On Hold", "pass": "Pass"}.get(decision_key, decision_key)
+                        add_log(f"  📋 Listing: {decision_label} ✅")
 
                 except Exception as e:
                     add_log(f"  ❌ Notion error: {e}")
@@ -2112,8 +2191,11 @@ with tab3:
                                     if ok2:
                                         st.success("📤 Push Notion สำเร็จค่ะ!")
                                         if JOB_LISTING_DB_ID:
-                                            # ทุก job ที่ push สำเร็จ → "added" เสมอ
-                                            upsert_job_listing(fr["url"], status_key="added")
+                                            # อัปเดต Listing ตามผลตัดสินของ AI (To Apply / On Hold / Pass)
+                                            decision_key2 = APPLY_DECISION_TO_LISTING_STATUS.get(
+                                                a2.get("apply_decision", "").upper(), "on_hold"
+                                            )
+                                            upsert_job_listing(fr["url"], status_key=decision_key2)
                                         with st.spinner("กำลัง rerank jobs..."):
                                             try:
                                                 rerank_all_jobs(opt, lambda *_: None)
