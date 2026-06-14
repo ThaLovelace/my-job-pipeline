@@ -1679,12 +1679,19 @@ with tab3:
             return [], "ไม่มี JOB_LISTING_DB_ID"
         try:
             pmap = get_listing_property_map()
-            status_field = pmap.get("status", "Status")
-            status_type  = pmap.get("status_type", "select")
-            url_field    = pmap.get("url", "URL")
-            name_field   = pmap.get("name", "Name")
-            jd_field     = pmap.get("jd", "JD")
+            status_field  = pmap.get("status", "Status")
+            status_type   = pmap.get("status_type", "select")
+            url_field     = pmap.get("url", "URL")
+            name_field    = pmap.get("name", "Name")
+            jd_field      = pmap.get("jd", "JD")
             company_field = pmap.get("company", "Company")
+
+            status_map = get_listing_status_map()
+            # reverse map: display name (lowered) → canonical key
+            # e.g. "llm error" → "llm_error", "consider" → "consider"
+            display_to_key = {v.lower(): k for k, v in status_map.items()}
+            # fallback: canonical key itself (in case Notion stores the key)
+            display_to_key.update({k: k for k in status_map})
 
             # ── Paginate ทุก row (ไม่มี limit 100) ─────────────
             rows = []
@@ -1703,9 +1710,11 @@ with tab3:
             # สถานะที่ "เสร็จแล้ว" หรือ ต้องรอแก้ไขด้วยมือก่อน → ข้ามถาวร (auto-queue ไม่หยิบ)
             # need_company: รอผู้ใช้กรอกชื่อบริษัทใน Notion แล้วเปลี่ยนเป็น llm_error เพื่อ retry เอง
             DONE_STATUSES = {"added", "fetch_error", "need_company"}
-            # สถานะที่ "ว่าง" → ถือว่า pending ใหม่
+            # สถานะที่ "ว่าง" → ถือว่า pending ใหม่ (fetch + LLM ทุกขั้น)
             EMPTY_STATUS_VALUES = {"", "no status", "no apply status", "none", "-"}
-            # llm_error / consider → retry ได้ (JD ดึงมาได้แล้ว แต่ LLM พัง หรือยัง push ไม่สำเร็จ)
+            # สถานะที่ retry ได้ — skip fetch แต่ run LLM ใหม่
+            # llm_error / consider → JD ดึงมาได้แล้ว แต่ LLM พัง หรือยังไม่ push สำเร็จ
+            SKIP_FETCH_STATUSES = {"llm_error", "consider"}
 
             pending = []
             for row in rows:
@@ -1714,18 +1723,24 @@ with tab3:
                 # ── อ่าน status ด้วยชื่อ field จริง ──────────────
                 sp = props.get(status_field, {})
                 sel = sp.get("select") or sp.get("status") or {}
-                status_val = (sel.get("name") or "").strip()
-                status_lower = status_val.lower()
+                status_val   = (sel.get("name") or "").strip()
+                status_lower = status_val.lower().strip()
 
-                # ข้าม row ที่เสร็จแล้ว หรือ URL ใช้ไม่ได้ถาวร (consider/added/not_apply/fetch_error)
-                if status_lower in DONE_STATUSES:
+                # normalize display name (เช่น "LLM Error" → "llm error") → canonical key ("llm_error")
+                canonical_key = display_to_key.get(status_lower, status_lower)
+
+                # ข้าม row ที่เสร็จแล้ว หรือ URL ใช้ไม่ได้ถาวร
+                if canonical_key in DONE_STATUSES:
                     continue
-                if status_lower not in EMPTY_STATUS_VALUES:
-                    # retry เฉพาะ llm_error และ consider — JD ดึงมาได้แล้วแต่ LLM พัง หรือยังไม่ apply
-                    # fetch_error / added ข้ามถาวรแล้ว (อยู่ใน DONE_STATUSES)
-                    is_retryable = status_lower in ("llm_error", "consider")
-                    if not is_retryable:
-                        continue  # status ที่ไม่รู้จัก → ข้าม
+
+                if status_lower in EMPTY_STATUS_VALUES:
+                    # งานใหม่ — fetch + LLM ทุกขั้น
+                    skip_fetch = False
+                elif canonical_key in SKIP_FETCH_STATUSES:
+                    # มี JD แล้ว (llm_error) หรือยังไม่ push (consider) → skip fetch, run LLM ใหม่
+                    skip_fetch = True
+                else:
+                    continue  # status ที่ไม่รู้จัก → ข้าม
 
                 # ── URL ──────────────────────────────────────────
                 up = props.get(url_field, {})
@@ -1752,6 +1767,8 @@ with tab3:
                     "notion_id": row["id"], "url": url,
                     "name": name or url[:60], "jd_text": jd_text,
                     "company_name_hint": company_name_hint,
+                    "canonical_status": canonical_key,
+                    "skip_fetch": skip_fetch,
                 })
             return pending, None
         except Exception as e:
@@ -1783,8 +1800,13 @@ with tab3:
 
             with st.expander(f"ดูรายการทั้งหมด ({len(queue)} งาน)", expanded=False):
                 for i, q_job in enumerate(queue, 1):
+                    status_badge = q_job.get("canonical_status", "new") or "new"
                     has_jd = " *(มี JD แล้ว)*" if q_job.get("jd_text") else ""
-                    st.caption(f"{i}. {q_job['name'][:80]}  •  `{q_job['url'][:55]}`{has_jd}")
+                    skip_badge = " `[skip fetch]`" if q_job.get("skip_fetch") else ""
+                    st.caption(
+                        f"{i}. {q_job['name'][:70]}  •  `{q_job['url'][:50]}`  •  "
+                        f"`{status_badge}`{has_jd}{skip_badge}"
+                    )
 
             if st.button(f"🚀 วิเคราะห์ {len(queue)} งาน → Push Notion อัตโนมัติ",
                          key="btn_run_queue", type="primary"):
@@ -1867,6 +1889,26 @@ with tab3:
             if job.get("jd_text"):
                 jd = job["jd_text"]
                 add_log(f"  📋 ใช้ JD ที่มีอยู่แล้ว ({len(jd)} chars)")
+            elif job.get("skip_fetch"):
+                # status เป็น llm_error/consider แต่ field "JD" ว่าง (row เก่าก่อนแก้)
+                # → fallback fetch ใหม่
+                add_log(f"  ⚠️ ไม่มี JD ใน record (status retryable แต่ field JD ว่าง) — fetch ใหม่")
+                jd, fetch_err = fetch_jd(url)
+                if fetch_err or not jd:
+                    add_log(f"  ❌ Fetch failed: {fetch_err}")
+                    stats["err"] += 1
+                    results.append({"url": url, "name": name, "status": "error", "error": fetch_err})
+                    if JOB_LISTING_DB_ID:
+                        _uid, _uerr = upsert_job_listing(url, status_key="fetch_error",
+                                           error_note=f"Fetch failed (retry fallback): {fetch_err}")
+                        if _uerr:
+                            add_log(f"  ⚠️ Listing update failed: {_uerr}")
+                        else:
+                            add_log(f"  📋 Listing: fetch_error (ออกจาก queue แล้ว — retry ได้ใส่ JD เองด้านล่าง)")
+                    if i < len(jobs_to_run) - 1:
+                        time.sleep(delay)
+                    continue
+                add_log(f"  📄 {jd[:80].replace(chr(10),' ')}...")
             else:
                 add_log(f"  🌐 Fetching JD...")
                 jd, fetch_err = fetch_jd(url)
