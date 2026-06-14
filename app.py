@@ -707,6 +707,94 @@ def submit_to_notion(job_data, company_data):
         st.code("\n".join(log_lines))
 
 
+def analysis_to_notion_dicts(a, job_url):
+    ip = a.get("interview_prep", {})
+    ag = a.get("application_guide", {})
+    parts = [a.get("narrative_analysis", "")]
+    if ip:
+        parts.append("\n--- INTERVIEW PREP ---")
+        for q in ip.get("behavioral_questions", []):
+            parts.append(f"[Behavioral] {q.get('question','')}\n  → {q.get('answer_guide','')}")
+        for q in ip.get("technical_questions", []):
+            parts.append(f"[Technical] {q.get('question','')}\n  → {q.get('answer_guide','')}")
+        if ip.get("questions_to_ask"):
+            parts.append("ถามกลับ:\n" + "\n".join(f"  • {q}" for q in ip["questions_to_ask"]))
+        if ip.get("salary_negotiation_script"):
+            parts.append(f"\n💰 Salary Script:\n{ip['salary_negotiation_script']}")
+    if ag:
+        parts.append("\n--- APPLICATION GUIDE ---")
+        if ag.get("how_to_apply"):
+            parts.append(f"How to apply: {ag['how_to_apply']}")
+        if ag.get("things_to_prepare"):
+            parts.append("เตรียม:\n" + "\n".join(f"  • {x}" for x in ag["things_to_prepare"]))
+    if a.get("resume_version"):
+        parts.append(f"\n--- RESUME ---\nใช้: {a['resume_version']}\nเหตุผล: {a.get('resume_reason','')}")
+
+    # ── clean role_tier: เอาแค่ Tier1/Tier2/Tier3 ──────────────
+    import re as _re
+    raw_tier = a.get("role_tier", "")
+    tier_reason = a.get("role_tier_reason", "")
+    tier_match = _re.search(r"(Tier\s*[123])", raw_tier, _re.IGNORECASE)
+    if tier_match:
+        clean_tier = tier_match.group(1).replace(" ", "")
+        if not tier_reason:
+            leftover = _re.sub(r"Tier\s*[123]\s*[—\-–]?\s*", "", raw_tier).strip()
+            if leftover:
+                tier_reason = leftover
+    else:
+        clean_tier = raw_tier
+
+    # merge tier_reason เข้า notes
+    base_notes = a.get("notes", "")
+    notes_parts_list = [p for p in [base_notes, tier_reason] if p]
+
+    # ถ้า salary เป็นค่าประมาณ (ไม่ใช่ระบุใน JD) → ใส่หมายเหตุไว้
+    if a.get("salary_is_estimated") and (a.get("salary_min") or a.get("salary_max")):
+        est_reason = a.get("salary_estimate_reason", "")
+        est_note = "💰 เงินเดือนเป็นค่าประมาณ (JD ไม่ได้ระบุ)"
+        if est_reason:
+            est_note += f": {est_reason}"
+        notes_parts_list.append(est_note)
+
+    merged_notes = " | ".join(notes_parts_list)[:500]
+
+    # ปรับเหลือแค่ job_url หลักชิ้นเดียว
+    job_data = {
+        "job_title":       a.get("job_title", "Unknown"),
+        "role_tier":       clean_tier,
+        "fit_level":       a.get("fit_level", "medium"),
+        "apply_status":    {
+            "APPLY":     "To Apply",
+            "WATCHLIST": "On Hold",
+            "PASS":      "❌ Pass ไม่เอา",
+        }.get(a.get("apply_decision", "").upper(), "No Apply Status"),
+        "work_location":   a.get("work_location", ""),
+        "salary_min":      a.get("salary_min") or None,
+        "salary_max":      a.get("salary_max") or None,
+        "job_url":         job_url,
+        "apply_email":     a.get("apply_email", ""),
+        "platform":        a.get("platform", ""),
+        "key_tech_stack":  a.get("key_tech_stack", ""),
+        "gaps":            a.get("gaps", ""),
+        "notes":           merged_notes,
+        "analysis":        "\n\n".join(parts),
+        "ai_depth_score":  a.get("ai_depth_score") or None,
+        "ownership_score": a.get("ownership_score") or None,
+        "skill_match_pct": a.get("my_skill_match_pct") or None,
+    }
+    company_data = {
+        "company_name": a.get("company_name", "Unknown"),
+        "company_size": a.get("company_size", ""),
+        "company_tier": a.get("company_tier", ""),
+        "industry":     a.get("industry", ""),
+        "location":     a.get("location", ""),
+        "wfh_policy":   a.get("wfh_policy", "Unknown"),
+        "website":      a.get("website", ""),
+        "notes":        "",
+    }
+    return job_data, company_data
+
+
 # ── Tabs ─────────────────────────────────────────────────
 tab1, tab2, tab3 = st.tabs(["📝 Paste Python Dict (Fast)", "✍️ Manual Form", "🤖 Batch Analyze"])
 
@@ -1627,94 +1715,6 @@ def _parse_llm_json(raw):
             "salary_estimate_reason": extract("salary_estimate_reason", ""),
             "error": "JSON truncated — partial data recovered"
         }
-
-
-def analysis_to_notion_dicts(a, job_url):
-    ip = a.get("interview_prep", {})
-    ag = a.get("application_guide", {})
-    parts = [a.get("narrative_analysis", "")]
-    if ip:
-        parts.append("\n--- INTERVIEW PREP ---")
-        for q in ip.get("behavioral_questions", []):
-            parts.append(f"[Behavioral] {q.get('question','')}\n  → {q.get('answer_guide','')}")
-        for q in ip.get("technical_questions", []):
-            parts.append(f"[Technical] {q.get('question','')}\n  → {q.get('answer_guide','')}")
-        if ip.get("questions_to_ask"):
-            parts.append("ถามกลับ:\n" + "\n".join(f"  • {q}" for q in ip["questions_to_ask"]))
-        if ip.get("salary_negotiation_script"):
-            parts.append(f"\n💰 Salary Script:\n{ip['salary_negotiation_script']}")
-    if ag:
-        parts.append("\n--- APPLICATION GUIDE ---")
-        if ag.get("how_to_apply"):
-            parts.append(f"How to apply: {ag['how_to_apply']}")
-        if ag.get("things_to_prepare"):
-            parts.append("เตรียม:\n" + "\n".join(f"  • {x}" for x in ag["things_to_prepare"]))
-    if a.get("resume_version"):
-        parts.append(f"\n--- RESUME ---\nใช้: {a['resume_version']}\nเหตุผล: {a.get('resume_reason','')}")
-
-    # ── clean role_tier: เอาแค่ Tier1/Tier2/Tier3 ──────────────
-    import re as _re
-    raw_tier = a.get("role_tier", "")
-    tier_reason = a.get("role_tier_reason", "")
-    tier_match = _re.search(r"(Tier\s*[123])", raw_tier, _re.IGNORECASE)
-    if tier_match:
-        clean_tier = tier_match.group(1).replace(" ", "")
-        if not tier_reason:
-            leftover = _re.sub(r"Tier\s*[123]\s*[—\-–]?\s*", "", raw_tier).strip()
-            if leftover:
-                tier_reason = leftover
-    else:
-        clean_tier = raw_tier
-
-    # merge tier_reason เข้า notes
-    base_notes = a.get("notes", "")
-    notes_parts_list = [p for p in [base_notes, tier_reason] if p]
-
-    # ถ้า salary เป็นค่าประมาณ (ไม่ใช่ระบุใน JD) → ใส่หมายเหตุไว้
-    if a.get("salary_is_estimated") and (a.get("salary_min") or a.get("salary_max")):
-        est_reason = a.get("salary_estimate_reason", "")
-        est_note = "💰 เงินเดือนเป็นค่าประมาณ (JD ไม่ได้ระบุ)"
-        if est_reason:
-            est_note += f": {est_reason}"
-        notes_parts_list.append(est_note)
-
-    merged_notes = " | ".join(notes_parts_list)[:500]
-
-    # ปรับเหลือแค่ job_url หลักชิ้นเดียว
-    job_data = {
-        "job_title":       a.get("job_title", "Unknown"),
-        "role_tier":       clean_tier,
-        "fit_level":       a.get("fit_level", "medium"),
-        "apply_status":    {
-            "APPLY":     "To Apply",
-            "WATCHLIST": "On Hold",
-            "PASS":      "❌ Pass ไม่เอา",
-        }.get(a.get("apply_decision", "").upper(), "No Apply Status"),
-        "work_location":   a.get("work_location", ""),
-        "salary_min":      a.get("salary_min") or None,
-        "salary_max":      a.get("salary_max") or None,
-        "job_url":         job_url,
-        "apply_email":     a.get("apply_email", ""),
-        "platform":        a.get("platform", ""),
-        "key_tech_stack":  a.get("key_tech_stack", ""),
-        "gaps":            a.get("gaps", ""),
-        "notes":           merged_notes,
-        "analysis":        "\n\n".join(parts),
-        "ai_depth_score":  a.get("ai_depth_score") or None,
-        "ownership_score": a.get("ownership_score") or None,
-        "skill_match_pct": a.get("my_skill_match_pct") or None,
-    }
-    company_data = {
-        "company_name": a.get("company_name", "Unknown"),
-        "company_size": a.get("company_size", ""),
-        "company_tier": a.get("company_tier", ""),
-        "industry":     a.get("industry", ""),
-        "location":     a.get("location", ""),
-        "wfh_policy":   a.get("wfh_policy", "Unknown"),
-        "website":      a.get("website", ""),
-        "notes":        "",
-    }
-    return job_data, company_data
 
 
 with tab3:
