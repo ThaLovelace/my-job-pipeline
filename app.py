@@ -97,6 +97,38 @@ def fuzzy_match(value, choices, cutoff=0.6):
         return cleaned_choices[matches[0]]
     return value
 
+def _company_from_url(url):
+    """
+    พยายาม extract ชื่อบริษัทจาก URL — คืน string หรือ None
+    เช่น: careers.shopee.co.th → "Shopee"
+          jobs.grab.com → "Grab"
+          th.jobsdb.com/job/... → None (job board ไม่ใช่บริษัท)
+    """
+    JOB_BOARDS = {
+        "jobsdb", "jobthai", "linkedin", "indeed", "jobstreet",
+        "workday", "lever", "greenhouse", "bamboohr", "smartrecruiters",
+        "facebook", "fastwork", "glints", "th.jobsdb",
+    }
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        # ถ้าเป็น job board → return None
+        for board in JOB_BOARDS:
+            if board in host:
+                return None
+        # ตัด www., careers., jobs., th., en. ออก
+        parts = host.replace("www.", "").replace("careers.", "").replace("jobs.", "").split(".")
+        # ใช้ส่วนแรกที่ไม่ใช่ country code
+        SKIP = {"co", "com", "th", "net", "org", "io", "ai", "app", "in", "sg", "my"}
+        for part in parts:
+            if part and part not in SKIP and len(part) > 2:
+                return part.capitalize()
+    except Exception:
+        pass
+    return None
+
+
 def get_select_options(db_id, property_name):
     res = requests.get("https://api.notion.com/v1/databases/" + db_id, headers=HEADERS)
     props = res.json().get("properties", {})
@@ -1106,8 +1138,15 @@ Reply ONLY with valid JSON. No markdown. No backticks. No extra text.
 
 Rules:
 - job_title: exact position name (e.g. "Data Engineer", "AI Developer"). NEVER leave empty.
-- company_name: hiring company name. Search EVERYWHERE in the text: page title, "About us / เกี่ยวกับเรา", copyright footer, email domain, brand logos described, or any organization name. If truly not found anywhere, use "Not specified" — but try hard first.
-- If the JD mentions applying "at [Company]" or "join [Company]" or "we are [Company]", extract that name.
+- company_name: hiring company name. Search EVERYWHERE in the text in this order:
+    1. First 3 lines / document title
+    2. "About us / เกี่ยวกับเรา / เกี่ยวกับบริษัท" sections
+    3. Copyright footer: "© 2024 CompanyName"
+    4. Email domains: "hr@company.com" → extract "Company"
+    5. Phrases: "join [X]", "at [X]", "we are [X]", "work at [X]", "apply at [X]", "posted by [X]"
+    6. Thai patterns: "บริษัท X จำกัด", "บริษัท X (มหาชน)", "ร่วมงานกับ X", "สมัครงานที่ X"
+    7. Any capitalized brand/organization name that appears 2+ times
+    Use "Not specified" only if genuinely absent after checking all above.
 - salary_min / salary_max: numbers in THB only, null if not stated.
 - wfh_policy: one of "WFH Available" / "Hybrid" / "On-site" / "Unknown"
 
@@ -1355,17 +1394,27 @@ def analyze_with_llm(jd_text, retries=2):
     cn = result.get("company_name", "")
     if not cn or cn.lower() in ("not specified", "unknown", ""):
         # พยายามดึงชื่อบริษัทจาก JD ด้วย regex เป็น last resort
-        # หา pattern: "Company:", "บริษัท:", brand name ใน title line แรก
         company_patterns = [
-            r"(?:company|บริษัท|employer|องค์กร)\s*[:\-]\s*(.+)",
-            r"(?:about|เกี่ยวกับ)\s+([A-Z][A-Za-z0-9\s&\.]+?)(?:\n|จำกัด|Co\.|Ltd\.)",
-            r"©\s*\d{4}\s+([A-Za-z][A-Za-z0-9\s&\.]+?)(?:\s|$)",
+            # Thai patterns
+            r"บริษัท\s+([^\s][^\n]+?)(?:\s+จำกัด|\s+\(มหาชน\)|$)",
+            r"(?:สมัครงานที่|ร่วมงานกับ|ทำงานกับ)\s+([A-Za-zก-๛][^\n]{2,40})",
+            # English patterns
+            r"(?:company|employer|organization|posted by|hiring company)\s*[:\-]\s*(.+)",
+            r"(?:about|join|at|work at|careers at)\s+([A-Z][A-Za-z0-9\s&\.]{2,40}?)(?:\n|,|\.|$)",
+            r"©\s*(?:\d{4}\s+)?([A-Za-z][A-Za-z0-9\s&\.]{2,40}?)(?:\s|,|\.|All rights)",
+            # Email domain
+            r"[\w\.\+]+@([a-z0-9\-]+)\.[a-z]{2,}",
         ]
         for pat in company_patterns:
-            m = re.search(pat, jd_text[:3000], re.IGNORECASE | re.MULTILINE)
+            m = re.search(pat, jd_text[:4000], re.IGNORECASE | re.MULTILINE)
             if m:
                 candidate = m.group(1).strip()[:80]
-                if len(candidate) > 2:
+                # กรณี email domain → capitalize
+                if "@" in pat:
+                    candidate = candidate.split(".")[0].capitalize()
+                # กรอง false positives
+                SKIP_WORDS = {"apply", "job", "position", "role", "work", "us", "the", "our"}
+                if len(candidate) > 2 and candidate.lower() not in SKIP_WORDS:
                     result["company_name"] = candidate
                     break
 
@@ -1501,6 +1550,9 @@ with tab3:
                 headers=HEADERS, json={"page_size": 100}
             )
             rows = res.json().get("results", [])
+            # ค่า status ที่ถือว่า "ยังไม่มีสถานะ" (pending) — ข้ามทุก row ที่มีค่าอื่น
+            EMPTY_STATUS_VALUES = {"", "no status", "no apply status", "none", "-"}
+
             pending = []
             for row in rows:
                 props = row.get("properties", {})
@@ -1509,7 +1561,9 @@ with tab3:
                 sp = props.get(status_field, {})
                 sel = sp.get("select") or sp.get("status") or {}
                 status_val = (sel.get("name") or "").strip()
-                if status_val and status_val.lower() not in ("", "no status", "no apply status"):
+                # ข้ามทุก row ที่มีค่า status ใดๆ ที่ไม่ใช่ "ว่าง" —
+                # รวม fetch_error, llm_error, consider, added, not_apply ฯลฯ
+                if status_val.lower() not in EMPTY_STATUS_VALUES:
                     continue  # มี status แล้ว → ข้าม
 
                 # ── URL ──────────────────────────────────────────
@@ -1708,8 +1762,19 @@ with tab3:
                     if not j_data.get("job_title", "").strip():
                         raise ValueError("no job title")
                     cname = c_data.get("company_name", "").strip()
+                    # ถ้าชื่อบริษัทไม่ชัดเจน → ใช้ชื่อ fallback แทน ไม่ block push
                     if not cname or cname.lower() in ("not specified", "unknown", ""):
-                        raise ValueError(f"company name ไม่ชัดเจน ('{cname}')")
+                        # พยายาม extract จาก URL ก่อน (เช่น careers.shopee.co.th → Shopee)
+                        url_company = _company_from_url(url)
+                        if url_company:
+                            cname = url_company
+                            c_data["company_name"] = cname
+                            add_log(f"  🔎 Company from URL: {cname}")
+                        else:
+                            # fallback สุดท้าย: ใช้ชื่อตำแหน่งเป็น label เพื่อไม่ให้หาย
+                            cname = f"[Unknown] {j_data.get('job_title','?')[:40]}"
+                            c_data["company_name"] = cname
+                            add_log(f"  ⚠️ Company name unknown — ใช้ fallback: {cname}")
                     company_id, found = search_company(cname)
                     if not found or not company_id:
                         company_id, cerr = create_company(c_data, opt)
@@ -1802,7 +1867,12 @@ with tab3:
                                         raise ValueError("no job title")
                                     cn2 = c2.get("company_name","").strip()
                                     if not cn2 or cn2.lower() in ("not specified","unknown",""):
-                                        raise ValueError(f"company name ว่าง ('{cn2}')")
+                                        cn2_from_url = _company_from_url(fr["url"])
+                                        if cn2_from_url:
+                                            cn2 = cn2_from_url
+                                        else:
+                                            cn2 = f"[Unknown] {j2.get('job_title','?')[:40]}"
+                                        c2["company_name"] = cn2
                                     cid, f2 = search_company(cn2)
                                     if not f2 or not cid:
                                         cid, cerr2 = create_company(c2, opt)
