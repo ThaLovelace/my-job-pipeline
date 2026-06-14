@@ -149,6 +149,7 @@ def load_options():
             "Role Tier":    get_select_options(JOB_PIPELINE_DB_ID, "Role Tier"),
             "Fit Level":    get_select_options(JOB_PIPELINE_DB_ID, "Fit Level"),
             "Apply Status": get_select_options(JOB_PIPELINE_DB_ID, "Apply Status"),
+            "Platform":     get_select_options(JOB_PIPELINE_DB_ID, "Platform"),
         }
     }
 
@@ -225,6 +226,7 @@ def create_job(d, company_page_id, opt):
         "Key Tech Stack":  {"rich_text": [{"text": {"content": d.get("key_tech_stack", "")}}]},
         "Gaps to Address": {"rich_text": [{"text": {"content": d.get("gaps", "")}}]},
         "Notes":           {"rich_text": [{"text": {"content": d.get("notes", "")}}]},
+        "Apply Email":     {"rich_text": [{"text": {"content": d.get("apply_email", "")}}]},
         "Date Applied":    {"date": {"start": time.strftime("%Y-%m-%d")}},
     }
 
@@ -233,6 +235,7 @@ def create_job(d, company_page_id, opt):
         ("Role Tier",    "role_tier"),
         ("Fit Level",    "fit_level"),
         ("Apply Status", "apply_status"),
+        ("Platform",     "platform"),
     ]:
         v = sel(d.get(key, ""), opt["job"][field])
         if v:
@@ -910,6 +913,8 @@ apply_decision logic:
   "resume_reason": "เหตุผล 1-2 ประโยคว่าทำไม version นี้ถึง match tone ของบริษัทนี้",
   "apply_decision": "APPLY/WATCHLIST/PASS",
   "apply_url": "ลิงค์สมัครโดยตรงจาก JD ถ้าไม่มีให้ใส่ค่าว่าง",
+  "apply_email": "อีเมลสำหรับส่งใบสมัคร ถ้ามีใน JD ถ้าไม่มีให้ใส่ค่าว่าง",
+  "platform": "ชื่อแพลตฟอร์มที่โพสต์งานนี้ เช่น LinkedIn/JobThai/Indeed/Company Website/อื่นๆ ถ้าไม่ทราบให้ใส่ค่าว่าง",
   "company_size": "startup/sme/enterprise",
   "company_tier": "Level1/Level2/Level3",
   "company_tier_reason": "เหตุผลสั้นๆ",
@@ -1194,6 +1199,8 @@ JSON structure to return:
   "company_size": "<e.g. 50-200 or null>",
   "industry": "<e.g. HR Tech, Fintech or null>",
   "apply_url": "<URL or null>",
+  "apply_email": "<email address to send application to, or null>",
+  "platform": "<platform this job is posted on, e.g. LinkedIn/JobThai/Indeed/Company Website, or null>",
   "website": "<URL or null>"
 }}
 """
@@ -1432,6 +1439,8 @@ def analyze_with_llm(jd_text, retries=2):
         ("industry",       ""),
         ("website",        ""),
         ("apply_url",      ""),
+        ("apply_email",    ""),
+        ("platform",       ""),
         ("salary_min",     None),
         ("salary_max",     None),
     ]
@@ -1498,6 +1507,8 @@ def _parse_llm_json(raw):
             "company_tier":   extract("company_tier", ""),
             "industry":       extract("industry", ""),
             "apply_url":      extract("apply_url", ""),
+            "apply_email":    extract("apply_email", ""),
+            "platform":       extract("platform", ""),
             "error": "JSON truncated — partial data recovered"
         }
 
@@ -1558,6 +1569,8 @@ def analysis_to_notion_dicts(a, job_url):
         "salary_min":      a.get("salary_min") or None,
         "salary_max":      a.get("salary_max") or None,
         "job_url":         job_url,
+        "apply_email":     a.get("apply_email", ""),
+        "platform":        a.get("platform", ""),
         "key_tech_stack":  a.get("key_tech_stack", ""),
         "gaps":            a.get("gaps", ""),
         "notes":           merged_notes,
@@ -1631,7 +1644,7 @@ with tab3:
                 payload["start_cursor"] = data["next_cursor"]
 
             # สถานะที่ "เสร็จแล้ว" หรือ URL ใช้ไม่ได้ถาวร → ข้ามถาวร
-            DONE_STATUSES = {"consider", "added", "fetch_error"}
+            DONE_STATUSES = {"added", "fetch_error"}
             # สถานะที่ "ว่าง" → ถือว่า pending ใหม่
             EMPTY_STATUS_VALUES = {"", "no status", "no apply status", "none", "-"}
             # llm_error → retry ได้ (JD ดึงมาได้แล้ว แต่ LLM พัง)
@@ -1650,9 +1663,9 @@ with tab3:
                 if status_lower in DONE_STATUSES:
                     continue
                 if status_lower not in EMPTY_STATUS_VALUES:
-                    # retry เฉพาะ llm_error — JD ดึงมาได้แล้วแต่ LLM พัง
-                    # fetch_error ข้ามถาวรแล้ว (อยู่ใน DONE_STATUSES)
-                    is_retryable = status_lower == "llm_error"
+                    # retry เฉพาะ llm_error และ consider — JD ดึงมาได้แล้วแต่ LLM พัง หรือยังไม่ apply
+                    # fetch_error / added ข้ามถาวรแล้ว (อยู่ใน DONE_STATUSES)
+                    is_retryable = status_lower in ("llm_error", "consider")
                     if not is_retryable:
                         continue  # status ที่ไม่รู้จัก → ข้าม
 
