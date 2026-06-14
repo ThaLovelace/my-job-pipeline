@@ -98,12 +98,6 @@ def fuzzy_match(value, choices, cutoff=0.6):
     return value
 
 def _company_from_url(url):
-    """
-    พยายาม extract ชื่อบริษัทจาก URL — คืน string หรือ None
-    เช่น: careers.shopee.co.th → "Shopee"
-          jobs.grab.com → "Grab"
-          th.jobsdb.com/job/... → None (job board ไม่ใช่บริษัท)
-    """
     JOB_BOARDS = {
         "jobsdb", "jobthai", "linkedin", "indeed", "jobstreet",
         "workday", "lever", "greenhouse", "bamboohr", "smartrecruiters",
@@ -1510,6 +1504,30 @@ with tab3:
     # SECTION A — ดึงจาก Job Listing DB (main flow)
     # ══════════════════════════════════════════════════════════
     def fetch_pending_listings():
+        """
+        ดึง rows จาก Job Listing DB ที่ยังรอประมวลผล
+        พร้อมแนบ flag เพื่อบอก pipeline ว่าต้อง skip fetch หรือ skip LLM
+
+        สถานะและพฤติกรรมที่ต้องการ:
+        ┌──────────────┬─────────────┬──────────┬──────────┐
+        │ Status       │ หยิบมา?     │ skip     │ skip     │
+        │              │             │ fetch?   │ LLM?     │
+        ├──────────────┼─────────────┼──────────┼──────────┤
+        │ (ว่าง/ใหม่) │ ✅           │ ❌        │ ❌        │
+        │ consider     │ ✅           │ ✅ (ใช้ JD│ ❌        │
+        │              │             │ ที่มีอยู่)│          │
+        │ llm_error    │ ✅           │ ✅ (ใช้ JD│ ❌        │
+        │              │             │ ที่มีอยู่)│          │
+        │ added        │ ❌           │ -        │ -        │
+        │ fetch_error  │ ❌           │ -        │ -        │
+        │ need_company │ ❌           │ -        │ -        │
+        └──────────────┴─────────────┴──────────┴──────────┘
+
+        หมายเหตุ: consider และ llm_error ต่างกันตรงที่
+        - consider = fetch JD สำเร็จแต่ยังไม่ได้ push Notion → skip fetch, run LLM
+        - llm_error = fetch JD สำเร็จแต่ LLM ล้มเหลว → skip fetch, retry LLM
+        ทั้งคู่ skip fetch เหมือนกัน แต่ต้อง run LLM ทั้งคู่
+        """
         if not JOB_LISTING_DB_ID:
             return [], "ไม่มี JOB_LISTING_DB_ID"
         try:
@@ -1521,24 +1539,23 @@ with tab3:
             jd_field      = pmap.get("jd", "JD")
             company_field = pmap.get("company", "Company")
 
-            # ── Build reverse lookup: display name (lowered) → canonical key ──────
-            # ✅ FIX: เดิมเปรียบเทียบ status_lower กับ canonical key ที่มี underscore
-            # ("llm_error", "fetch_error") แต่ display name จาก Notion ใช้ space ("LLM Error")
-            # ทำให้ lower() ได้ "llm error" ≠ "llm_error" → บั๊ก
-            # แก้ด้วยการสร้าง reverse map ก่อนแล้วค่อย normalize
             status_map     = get_listing_status_map()
+            # reverse map: display name (lowered) → canonical key
+            # e.g. "llm error" → "llm_error", "consider" → "consider"
             display_to_key = {v.lower(): k for k, v in status_map.items()}
-            # fallback: ถ้า Notion บันทึก canonical key แทน display name
+            # fallback: canonical key itself (in case Notion stores the key)
             display_to_key.update({k: k for k in status_map})
 
-            # สถานะที่ "เสร็จแล้ว" — ออกจาก queue ถาวร
-            DONE_STATUSES       = {"added", "fetch_error", "need_company"}
-            # สถานะ "ว่าง" — ถือเป็น pending ใหม่
-            EMPTY_STATUS_VALUES = {"", "no status", "no apply status", "none", "-"}
-            # สถานะที่ retry ได้
-            RETRYABLE_STATUSES  = {"llm_error", "consider"}
+            # สถานะที่ "เสร็จแล้ว" — ไม่หยิบมาทำซ้ำ
+            DONE_STATUSES = {"added", "fetch_error", "need_company"}
 
-            # ── Paginate ────────────────────────────────────────────────────────────
+            # สถานะ "ว่าง" — ถือเป็น pending ใหม่ (fetch + LLM ทุกขั้น)
+            EMPTY_STATUS_VALUES = {"", "no status", "no apply status", "none", "-"}
+
+            # สถานะที่ retry ได้ — skip fetch แต่ run LLM
+            SKIP_FETCH_STATUSES = {"llm_error", "consider"}
+
+            # Paginate ทุก row
             rows = []
             payload = {"page_size": 100}
             while True:
@@ -1556,50 +1573,63 @@ with tab3:
             for row in rows:
                 props = row.get("properties", {})
 
-                # ── อ่าน status ──────────────────────────────────────────────────────
+                # อ่าน status value
                 sp = props.get(status_field, {})
                 sel = sp.get("select") or sp.get("status") or {}
-                status_val = (sel.get("name") or "").strip()
+                status_val   = (sel.get("name") or "").strip()
                 status_lower = status_val.lower().strip()
 
-                # ✅ FIX: normalize display name → canonical key ก่อนเปรียบเทียบ
+                # normalize display name → canonical key
                 canonical_key = display_to_key.get(status_lower, status_lower)
 
-                # ข้าม row ที่เสร็จแล้ว
+                # ข้าม row ที่ done แล้ว
                 if canonical_key in DONE_STATUSES:
                     continue
 
-                # ถ้าไม่ใช่ empty status → ต้องเป็น retryable ถึงจะหยิบ
-                if status_lower not in EMPTY_STATUS_VALUES:
-                    is_retryable = canonical_key in RETRYABLE_STATUSES
-                    if not is_retryable:
-                        continue
+                # กำหนด flag ตาม canonical_key
+                if status_lower in EMPTY_STATUS_VALUES:
+                    # งานใหม่ ทำทุกขั้น
+                    skip_fetch = False
+                elif canonical_key in SKIP_FETCH_STATUSES:
+                    # มี JD แล้ว แต่ยังไม่ได้ push หรือ LLM ล้มเหลว
+                    # → skip fetch, run LLM ใหม่
+                    skip_fetch = True
+                else:
+                    # สถานะอื่นที่ไม่รู้จัก — ข้ามไปก่อน
+                    continue
 
-                # ── URL ──────────────────────────────────────────────────────────────
-                up = props.get(url_field, {})
+                # URL (required)
+                up  = props.get(url_field, {})
                 url = (up.get("url") or "").strip()
                 if not url:
                     continue
 
-                # ── Name ─────────────────────────────────────────────────────────────
-                np = props.get(name_field, {})
+                # Name
+                np        = props.get(name_field, {})
                 title_arr = np.get("title", [])
-                name = title_arr[0].get("plain_text", "") if title_arr else ""
+                name      = title_arr[0].get("plain_text", "") if title_arr else ""
 
-                # ── JD ───────────────────────────────────────────────────────────────
-                jp = props.get(jd_field, {})
+                # JD (ถ้ามีอยู่แล้วใน Notion)
+                jp      = props.get(jd_field, {})
                 jd_arr  = jp.get("rich_text", [])
                 jd_text = jd_arr[0].get("plain_text", "") if jd_arr else ""
 
-                # ── Company hint (ถ้าผู้ใช้กรอกไว้เอง) ─────────────────────────────
-                cp = props.get(company_field, {})
+                # Company hint (ถ้าผู้ใช้กรอกไว้เอง)
+                cp          = props.get(company_field, {})
                 company_arr = cp.get("rich_text", []) or cp.get("title", [])
                 company_name_hint = company_arr[0].get("plain_text", "").strip() if company_arr else ""
 
                 pending.append({
-                    "notion_id": row["id"], "url": url,
-                    "name": name or url[:60], "jd_text": jd_text,
-                    "company_name_hint": company_name_hint,
+                    "notion_id":          row["id"],
+                    "url":                url,
+                    "name":               name or url[:60],
+                    "jd_text":            jd_text,
+                    "company_name_hint":  company_name_hint,
+                    "canonical_status":   canonical_key,
+                    # ── flags ──
+                    "skip_fetch":         skip_fetch,
+                    # LLM รันเสมอสำหรับ pending ทุกตัว
+                    # (ทั้ง consider และ llm_error ต้องการ LLM)
                 })
             return pending, None
         except Exception as e:
@@ -1631,8 +1661,14 @@ with tab3:
 
             with st.expander(f"ดูรายการทั้งหมด ({len(queue)} งาน)", expanded=False):
                 for i, q_job in enumerate(queue, 1):
+                    status_badge = q_job.get("canonical_status", "new")
                     has_jd = " *(มี JD แล้ว)*" if q_job.get("jd_text") else ""
-                    st.caption(f"{i}. {q_job['name'][:80]}  •  `{q_job['url'][:55]}`{has_jd}")
+                    skip_badge = " `[skip fetch]`" if q_job.get("skip_fetch") else ""
+                    st.caption(
+                        f"{i}. {q_job['name'][:70]}  •  "
+                        f"`{q_job['url'][:50]}`  •  "
+                        f"`{status_badge}`{has_jd}{skip_badge}"
+                    )
 
             if st.button(f"🚀 วิเคราะห์ {len(queue)} งาน → Push Notion อัตโนมัติ",
                          key="btn_run_queue", type="primary"):
@@ -1669,7 +1705,10 @@ with tab3:
                     base = u.split("?")[0].rstrip("/")
                     if base not in seen_m:
                         seen_m.add(base)
-                        manual_jobs.append({"url": u, "name": u[:60]})
+                        manual_jobs.append({
+                            "url": u, "name": u[:60],
+                            "skip_fetch": False,
+                        })
                 if manual_jobs:
                     st.caption(f"พบ {len(manual_jobs)} URL")
         else:
@@ -1681,7 +1720,11 @@ with tab3:
                                   key="manual_jd_text")
             if m_jd.strip():
                 ref = m_url.strip() or f"manual://jd-{hash(m_jd[:100]) % 100000}"
-                manual_jobs.append({"url": ref, "name": ref[:60], "jd_text": m_jd.strip()})
+                manual_jobs.append({
+                    "url": ref, "name": ref[:60],
+                    "jd_text": m_jd.strip(),
+                    "skip_fetch": True,   # มี JD อยู่แล้ว ไม่ต้อง fetch
+                })
                 st.caption("พบ 1 JD พร้อมวิเคราะห์")
 
         if manual_jobs:
@@ -1707,24 +1750,54 @@ with tab3:
             log_area.code("\n".join(logs[-30:]))
 
         for i, job in enumerate(jobs_to_run):
-            url  = job["url"]
-            name = job.get("name") or url[:50]
+            url         = job["url"]
+            name        = job.get("name") or url[:50]
+            skip_fetch  = job.get("skip_fetch", False)
+
             progress.progress(i / len(jobs_to_run), text=f"[{i+1}/{len(jobs_to_run)}] {name[:40]}...")
             add_log(f"\n[{i+1}/{len(jobs_to_run)}] {name[:55]}")
 
+            # ── STEP 1: Get JD ──────────────────────────────────────────────────
+            jd = ""
             if job.get("jd_text"):
+                # มี JD ใน job object อยู่แล้ว (จาก Notion field หรือ manual paste)
                 jd = job["jd_text"]
                 add_log(f"  📋 ใช้ JD ที่มีอยู่แล้ว ({len(jd)} chars)")
-            else:
-                add_log(f"  🌐 Fetching JD...")
+
+            elif skip_fetch:
+                # skip_fetch=True แต่ไม่มี JD → แจ้งเตือนและ force fetch
+                add_log(f"  ⚠️ skip_fetch=True แต่ไม่มี JD ใน record — force fetch")
                 jd, fetch_err = fetch_jd(url)
-                if fetch_err:
+                if fetch_err or not jd:
                     add_log(f"  ❌ Fetch failed: {fetch_err}")
                     stats["err"] += 1
                     results.append({"url": url, "name": name, "status": "error", "error": fetch_err})
                     if JOB_LISTING_DB_ID:
-                        _uid, _uerr = upsert_job_listing(url, status_key="fetch_error",
-                                           error_note=f"Fetch failed: {fetch_err}")
+                        _uid, _uerr = upsert_job_listing(
+                            url, status_key="fetch_error",
+                            error_note=f"Fetch failed (force): {fetch_err}"
+                        )
+                        if _uerr:
+                            add_log(f"  ⚠️ Listing update failed: {_uerr}")
+                        else:
+                            add_log(f"  📋 Listing: fetch_error")
+                    if i < len(jobs_to_run) - 1:
+                        time.sleep(delay)
+                    continue
+
+            else:
+                # งานใหม่ — fetch JD จาก URL
+                add_log(f"  🌐 Fetching JD...")
+                jd, fetch_err = fetch_jd(url)
+                if fetch_err or not jd:
+                    add_log(f"  ❌ Fetch failed: {fetch_err}")
+                    stats["err"] += 1
+                    results.append({"url": url, "name": name, "status": "error", "error": fetch_err})
+                    if JOB_LISTING_DB_ID:
+                        _uid, _uerr = upsert_job_listing(
+                            url, status_key="fetch_error",
+                            error_note=f"Fetch failed: {fetch_err}"
+                        )
                         if _uerr:
                             add_log(f"  ⚠️ Listing update failed: {_uerr}")
                         else:
@@ -1732,57 +1805,69 @@ with tab3:
                     if i < len(jobs_to_run) - 1:
                         time.sleep(delay)
                     continue
+
                 add_log(f"  📄 {jd[:80].replace(chr(10),' ')}...")
 
+                # บันทึก JD กลับ Notion (consider) เพื่อให้ retry LLM ได้
+                # โดยไม่ต้อง fetch ซ้ำถ้า LLM ล้มเหลวรอบนี้
+                if JOB_LISTING_DB_ID:
+                    upsert_job_listing(url, jd_raw=jd[:2000], status_key="consider")
+                    add_log(f"  📋 Listing: Consider (JD saved)")
+
+            # ── STEP 2: LLM Analysis ────────────────────────────────────────────
             add_log(f"  🤖 Analyzing + researching บริษัท...")
             company_hint = job.get("company_name_hint", "")
             if company_hint:
                 add_log(f"  🏷️ ใช้ชื่อบริษัทที่กรอกไว้: {company_hint}")
+
             analysis = analyze_with_llm(jd, known_company_name=company_hint)
             cn_log = analysis.get("company_name", "?")
             has_research = cn_log not in ("?", "Unknown", "Not specified", "")
             add_log(f"  {'🔍' if has_research else '⚠️'} {cn_log}")
 
+            # ── STEP 3: Handle LLM result ───────────────────────────────────────
             if analysis.get("error") == "no_company":
                 jt_nc = analysis.get("job_title", "Unknown")
-                add_log(f"  ⚠️ ไม่พบชื่อบริษัทใน JD ({jt_nc}) — ข้าม LLM fit analysis")
+                add_log(f"  ⚠️ ไม่พบชื่อบริษัทใน JD ({jt_nc})")
                 stats["err"] += 1
                 results.append({"url": url, "name": name, "status": "error", "error": "ไม่พบชื่อบริษัทใน JD"})
                 if JOB_LISTING_DB_ID:
-                    _uid, _uerr = upsert_job_listing(url, job_title=jt_nc,
-                                       jd_raw=jd[:2000] if 'jd' in locals() else "",
-                                       status_key="need_company",
-                                       error_note="ไม่พบชื่อบริษัทใน JD — กรุณากรอก Company แล้วเปลี่ยน status เป็น LLM Error เพื่อ retry")
+                    _uid, _uerr = upsert_job_listing(
+                        url, job_title=jt_nc,
+                        jd_raw=jd[:2000],
+                        status_key="need_company",
+                        error_note="ไม่พบชื่อบริษัทใน JD — กรุณากรอก Company แล้วเปลี่ยน status เป็น LLM Error เพื่อ retry"
+                    )
                     if _uerr:
                         add_log(f"  ⚠️ Listing update failed: {_uerr}")
                     else:
-                        add_log(f"  📋 Listing: need_company (กรอก Company แล้วเปลี่ยนเป็น LLM Error เพื่อ retry)")
+                        add_log(f"  📋 Listing: need_company")
+
             elif "error" in analysis and analysis.get("job_title", "Unknown") == "Unknown" and analysis.get("company_name", "Unknown") == "Unknown":
                 add_log(f"  ❌ LLM error: {analysis['error']}")
                 stats["err"] += 1
                 results.append({"url": url, "name": name, "status": "error", "error": analysis["error"]})
                 if JOB_LISTING_DB_ID:
-                    _uid, _uerr = upsert_job_listing(url, status_key="llm_error",
-                                       jd_raw=jd[:2000] if 'jd' in locals() else "",
-                                       error_note=f"LLM error: {analysis.get('error','')}")
+                    _uid, _uerr = upsert_job_listing(
+                        url, status_key="llm_error",
+                        jd_raw=jd[:2000],
+                        error_note=f"LLM error: {analysis.get('error','')}"
+                    )
                     if _uerr:
                         add_log(f"  ⚠️ Listing update failed: {_uerr}")
                     else:
-                        add_log(f"  📋 Listing: llm_error (ออกจาก queue แล้ว)")
+                        add_log(f"  📋 Listing: llm_error (JD saved — retry ได้โดยไม่ fetch ซ้ำ)")
+
             else:
-                jt = analysis.get("job_title", "?")
-                cn = analysis.get("company_name", "?")
+                # LLM สำเร็จ
+                jt       = analysis.get("job_title", "?")
+                cn       = analysis.get("company_name", "?")
                 decision = analysis.get("apply_decision", "?")
                 add_log(f"  ✅ {jt} @ {cn} | {analysis.get('fit_level','?')} | {decision}")
                 stats["ok"] += 1
                 result_entry = {"url": url, "name": name, "status": "ok", "analysis": analysis}
 
-                if JOB_LISTING_DB_ID:
-                    upsert_job_listing(url, job_title=jt, company_name=cn,
-                                       jd_raw=jd[:2000] if 'jd' in locals() else "",
-                                       status_key="consider")
-                    add_log(f"  📋 Listing: Consider")
-
+                # ── STEP 4: Push to Notion Job Pipeline ─────────────────────────
                 add_log(f"  📤 Pushing to Notion...")
                 try:
                     j_data, c_data = analysis_to_notion_dicts(analysis, url)
@@ -1796,7 +1881,7 @@ with tab3:
                             c_data["company_name"] = cname
                             add_log(f"  🔎 Company from URL: {cname}")
                         else:
-                            raise ValueError(f"ไม่ทราบชื่อบริษัท — ไม่ push Notion (แก้ใน Listing แล้วลอง retry)")
+                            raise ValueError("ไม่ทราบชื่อบริษัท — ไม่ push Notion (แก้ใน Listing แล้วลอง retry)")
                     company_id, found = search_company(cname)
                     if not found or not company_id:
                         company_id, cerr = create_company(c_data, opt)
@@ -1808,6 +1893,7 @@ with tab3:
                     add_log(f"  ✅ Notion OK")
                     stats["notion_ok"] += 1
 
+                    # อัปเดต Listing → Added (ออกจาก queue ถาวร)
                     if JOB_LISTING_DB_ID:
                         upsert_job_listing(url, status_key="added")
                         add_log(f"  📋 Listing: Added ✅")
@@ -1815,18 +1901,21 @@ with tab3:
                 except Exception as e:
                     add_log(f"  ❌ Notion error: {e}")
                     stats["notion_err"] += 1
-                    if JOB_LISTING_DB_ID and "ไม่ทราบชื่อบริษัท" in str(e):
-                        upsert_job_listing(url, status_key="fetch_error",
-                                           error_note=f"Company name unknown: {str(e)[:200]}")
-                        add_log(f"  📋 Listing: fetch_error (ไม่ทราบชื่อบริษัท)")
-                    else:
-                        add_log(f"  📋 Listing: คง Consider ไว้ (Notion error — retry ได้)")
+                    if JOB_LISTING_DB_ID:
+                        if "ไม่ทราบชื่อบริษัท" in str(e):
+                            upsert_job_listing(url, status_key="need_company",
+                                               error_note=f"Company name unknown: {str(e)[:200]}")
+                            add_log(f"  📋 Listing: need_company (ไม่ทราบชื่อบริษัท)")
+                        else:
+                            # Notion error อื่น → คง consider ไว้ retry ได้
+                            add_log(f"  📋 Listing: คง Consider ไว้ (Notion error — retry ได้)")
 
                 results.append(result_entry)
 
             if i < len(jobs_to_run) - 1:
                 time.sleep(delay)
 
+        # ── Rerank ──────────────────────────────────────────────────────────────
         if stats["notion_ok"] > 0:
             add_log("\n📊 Reranking all jobs...")
             try:
@@ -1840,6 +1929,7 @@ with tab3:
 
         progress.progress(1.0, text="เสร็จแล้ว! ✨")
 
+        # ── Summary ──────────────────────────────────────────────────────────────
         st.markdown("---")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("วิเคราะห์ได้",  stats["ok"])
@@ -1863,6 +1953,7 @@ with tab3:
             if top:
                 st.caption(f"Top skill gaps: {', '.join(f'{g}({n})' for g,n in top)}")
 
+        # ── Failed jobs retry UI ─────────────────────────────────────────────────
         failed_jobs = [r for r in results if r.get("status") == "error"]
         if failed_jobs:
             st.markdown("---")
@@ -1877,7 +1968,7 @@ with tab3:
                             with st.spinner("วิเคราะห์..."):
                                 a2 = analyze_with_llm(retry_jd.strip())
                             if "error" not in a2 or a2.get("job_title") != "Unknown":
-                                jt2 = a2.get("job_title", "?")
+                                jt2  = a2.get("job_title", "?")
                                 cn2d = a2.get("company_name", "?")
                                 st.success(f"✅ {jt2} @ {cn2d}")
                                 if JOB_LISTING_DB_ID:
