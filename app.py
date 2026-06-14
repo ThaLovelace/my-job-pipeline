@@ -98,6 +98,12 @@ def fuzzy_match(value, choices, cutoff=0.6):
     return value
 
 def _company_from_url(url):
+    """
+    พยายาม extract ชื่อบริษัทจาก URL — คืน string หรือ None
+    เช่น: careers.shopee.co.th → "Shopee"
+          jobs.grab.com → "Grab"
+          th.jobsdb.com/job/... → None (job board ไม่ใช่บริษัท)
+    """
     JOB_BOARDS = {
         "jobsdb", "jobthai", "linkedin", "indeed", "jobstreet",
         "workday", "lever", "greenhouse", "bamboohr", "smartrecruiters",
@@ -107,10 +113,13 @@ def _company_from_url(url):
         from urllib.parse import urlparse
         parsed = urlparse(url)
         host = parsed.hostname or ""
+        # ถ้าเป็น job board → return None
         for board in JOB_BOARDS:
             if board in host:
                 return None
+        # ตัด www., careers., jobs., th., en. ออก
         parts = host.replace("www.", "").replace("careers.", "").replace("jobs.", "").split(".")
+        # ใช้ส่วนแรกที่ไม่ใช่ country code
         SKIP = {"co", "com", "th", "net", "org", "io", "ai", "app", "in", "sg", "my"}
         for part in parts:
             if part and part not in SKIP and len(part) > 2:
@@ -181,6 +190,7 @@ def create_company(d, opt):
         "Notes":        {"rich_text": [{"text": {"content": d.get("notes", "")}}]},
     }
 
+    # ใส่ select เฉพาะเมื่อมีค่า — Notion error ถ้าส่ง name: ""
     for field, key in [
         ("Company Size", "company_size"),
         ("Company Tier", "company_tier"),
@@ -220,6 +230,7 @@ def create_job(d, company_page_id, opt):
         "Date Applied":    {"date": {"start": time.strftime("%Y-%m-%d")}},
     }
 
+    # select fields — skip ถ้าว่าง
     for field, key in [
         ("Role Tier",    "role_tier"),
         ("Fit Level",    "fit_level"),
@@ -230,10 +241,12 @@ def create_job(d, company_page_id, opt):
         if v:
             props[field] = {"select": {"name": v}}
 
+    # ── แก้ไขจุดนี้: ยุบรวมเหลือแค่คอลัมน์ "๋Job URL" ตามโครงสร้าง Notion ของคุณหนู ──
     url_to_save = d.get("job_url") or d.get("linkedin_url")
     if url_to_save:
         props["๋Job URL"] = {"url": url_to_save}
 
+    # ── Score fields (บันทึกเสมอ ถ้ามีค่า) ────────────────────
     if d.get("ai_depth_score") is not None:
         props["AI Depth Score"] = {"number": d["ai_depth_score"]}
     if d.get("ownership_score") is not None:
@@ -266,11 +279,13 @@ def create_job(d, company_page_id, opt):
 # ── Job Listing DB helpers ───────────────────────────────
 
 def _get_listing_status_options():
+    """ดึง select options จาก Job Listing DB สำหรับ fuzzy match"""
     if not JOB_LISTING_DB_ID:
         return []
     try:
         res = requests.get("https://api.notion.com/v1/databases/" + JOB_LISTING_DB_ID, headers=HEADERS)
         props = res.json().get("properties", {})
+        # หา property ที่เป็น select หรือ status สำหรับ status column
         for name in ("Status", "status", "สถานะ"):
             prop = props.get(name, {})
             opts = prop.get("select", {}).get("options", []) or prop.get("status", {}).get("options", [])
@@ -282,6 +297,13 @@ def _get_listing_status_options():
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_listing_property_map(_bust=0):
+    """
+    ดึงชื่อ property จริงจาก Job Listing DB และ map กับชื่อ canonical ที่โค้ดใช้
+    คืน dict เช่น:
+      { "status": "Status", "name": "Name", "url": "URL",
+        "company": "Company", "jd": "JD", "notes": "Notes",
+        "status_type": "select"  # หรือ "status" (Notion status type) }
+    """
     if not JOB_LISTING_DB_ID:
         return {}
     try:
@@ -292,13 +314,16 @@ def get_listing_property_map(_bust=0):
 
     result = {}
 
+    # helper: หาชื่อ property จริงจาก candidates (fuzzy)
     def find_prop(candidates, types=None):
         prop_names = list(props.keys())
         for c in candidates:
+            # exact match ก่อน
             if c in props:
                 p = props[c]
                 if types is None or p.get("type") in types:
                     return c, p.get("type")
+            # fuzzy match
             matched = fuzzy_match(c, prop_names, cutoff=0.7)
             if matched and matched in props:
                 p = props[matched]
@@ -306,27 +331,33 @@ def get_listing_property_map(_bust=0):
                     return matched, p.get("type")
         return None, None
 
+    # Status (select หรือ status type)
     name, ptype = find_prop(["Status", "status", "สถานะ"], types=["select", "status"])
     if name:
         result["status"] = name
         result["status_type"] = ptype
 
+    # title field (Name ของ row)
     name, _ = find_prop(["Name", "name", "ชื่อ", "Job", "Title"], types=["title"])
     if name:
         result["name"] = name
 
+    # URL
     name, _ = find_prop(["URL", "url", "Link", "link", "ลิงก์"], types=["url"])
     if name:
         result["url"] = name
 
+    # Company
     name, _ = find_prop(["Company", "company", "บริษัท"], types=["rich_text", "title"])
     if name:
         result["company"] = name
 
+    # JD
     name, _ = find_prop(["JD", "jd", "Job Description", "Description", "รายละเอียด"], types=["rich_text"])
     if name:
         result["jd"] = name
 
+    # Notes
     name, _ = find_prop(["Notes", "notes", "Note", "note", "หมายเหตุ", "Error", "error"], types=["rich_text"])
     if name:
         result["notes"] = name
@@ -335,20 +366,29 @@ def get_listing_property_map(_bust=0):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_listing_status_map():
+    """คืน dict mapping ชื่อ canonical → ชื่อจริงใน Notion (fuzzy)"""
     options = _get_listing_status_options()
     return {
-        "consider":     fuzzy_match("Consider",     options, cutoff=0.5) or "Consider",
-        "added":        fuzzy_match("Added",         options, cutoff=0.5) or "Added",
+        # สถานะปกติ
+        "consider":    fuzzy_match("Consider",    options, cutoff=0.5) or "Consider",
+        "added":       fuzzy_match("Added",        options, cutoff=0.5) or "Added",
+        # error states — ออกจาก queue แต่ยังไม่เสร็จ
         "fetch_error":  fuzzy_match("Fetch Error",   options, cutoff=0.5) or "Fetch Error",
         "llm_error":    fuzzy_match("LLM Error",     options, cutoff=0.5) or "LLM Error",
         "need_company": fuzzy_match("Need Company",  options, cutoff=0.5) or "Need Company",
+        # not_apply ถูกลบออก — ทุก job ที่ push Notion สำเร็จใช้ "added" เสมอ
     }
 
 def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_key="consider", error_note=""):
+    """
+    สร้างหรืออัปเดต row ใน Job Listing DB
+    ใช้ชื่อ property จริงจาก get_listing_property_map() — ไม่ hardcode ชื่อ field ใดๆ
+    """
     if not JOB_LISTING_DB_ID:
         return None, "ไม่มี JOB_LISTING_DB_ID"
 
     pmap = get_listing_property_map()
+    # fallback ถ้า detect ไม่ได้ — ใช้ชื่อที่รู้จากผู้ใช้โดยตรง
     if not pmap.get("status"):
         pmap = {
             "status": "status", "status_type": "select",
@@ -359,6 +399,7 @@ def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_
     status_map  = get_listing_status_map()
     status_name = status_map.get(status_key, status_key)
 
+    # ── ค้นหา row เดิมด้วย URL ──────────────────────────────
     existing_id = None
     url_prop = pmap.get("url")
     if url_prop:
@@ -374,8 +415,10 @@ def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_
         except Exception:
             pass
 
+    # ── สร้าง properties payload ด้วยชื่อ property จริง ─────
     props = {}
 
+    # Status — always written
     status_prop = pmap.get("status")
     status_type = pmap.get("status_type", "select")
     if status_prop:
@@ -384,16 +427,26 @@ def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_
         else:
             props[status_prop] = {"select": {"name": status_name}}
 
+    # Name / title — only write if caller provided a value (avoid blanking existing title)
     name_prop = pmap.get("name")
     if name_prop and job_title:
         props[name_prop] = {"title": [{"text": {"content": job_title[:200]}}]}
 
+    # URL — only write if provided
     if url_prop and url:
         props[url_prop] = {"url": url}
 
+    # Company — only write if provided
     company_prop = pmap.get("company")
     if company_prop and company_name:
         props[company_prop] = {"rich_text": [{"text": {"content": company_name[:200]}}]}
+
+    # JD → เขียนทั้ง 2 ที่:
+    #   1. property "JD" (rich_text, ตัด 2000 chars) — ใช้ตอน retry (skip fetch, read jd_text)
+    #   2. page body blocks — ให้คนอ่านสบายตา ไม่ต้องตัด 2000 chars
+    jd_prop = pmap.get("jd")
+    if jd_prop and jd_raw:
+        props[jd_prop] = {"rich_text": [{"text": {"content": jd_raw[:2000]}}]}
 
     jd_blocks = []
     if jd_raw:
@@ -407,6 +460,7 @@ def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_
                 "paragraph": {"rich_text": [{"text": {"content": chunk}}]}
             })
 
+    # Notes — เขียนเฉพาะ error states เพื่อบอกสาเหตุ
     notes_prop = pmap.get("notes")
     notes_parts = []
     if status_key not in ("consider", "added"):
@@ -419,6 +473,7 @@ def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_
     if not props:
         return None, f"ไม่มี property ที่ map ได้เลย — pmap={pmap}"
 
+    # ── ส่ง request ──────────────────────────────────────────
     try:
         if existing_id:
             res = requests.patch(
@@ -432,10 +487,13 @@ def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_
                 return None, f"{notion_msg} | pmap={pmap}"
             page_id = result["id"]
 
+            # append JD blocks (replace ไม่ได้ใน Notion → append ต่อท้าย)
+            # ลบ blocks เก่าก่อนถ้ามีอยู่แล้ว เพื่อไม่ให้ซ้ำ
             if jd_blocks:
                 _replace_page_blocks(page_id, jd_blocks)
 
         else:
+            # สร้างใหม่ — ต้องมี title เสมอ
             if name_prop and name_prop not in props:
                 props[name_prop] = {"title": [{"text": {"content": (job_title or url)[:200]}}]}
             payload = {"parent": {"database_id": JOB_LISTING_DB_ID}, "properties": props}
@@ -459,24 +517,28 @@ def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_
 
 
 def _replace_page_blocks(page_id, new_blocks):
+    """ลบ blocks ทั้งหมดใน page แล้ว append ใหม่"""
     try:
+        # ดึง blocks เก่า
         res = requests.get(
             f"https://api.notion.com/v1/blocks/{page_id}/children",
             headers=HEADERS
         )
         old_blocks = res.json().get("results", [])
+        # ลบทีละ block
         for b in old_blocks:
             requests.delete(
                 f"https://api.notion.com/v1/blocks/{b['id']}",
                 headers=HEADERS
             )
+        # append blocks ใหม่
         requests.patch(
             f"https://api.notion.com/v1/blocks/{page_id}/children",
             headers=HEADERS,
             json={"children": new_blocks}
         )
     except Exception:
-        pass
+        pass  # ถ้า replace ไม่ได้ก็ไม่เป็นไร — properties ยังอัปเดตแล้ว
 
 
 def query_all_jobs(filter_payload):
@@ -519,20 +581,23 @@ def rerank_all_jobs(opt, log_fn):
         fit   = props.get("Fit Level", {}).get("select") or {}
         fit_s = FIT_SCORE.get(fit.get("name", "").lower(), 0)
 
-        ai_depth    = (props.get("AI Depth Score", {}).get("number") or 0)
-        ownership   = (props.get("Ownership Score", {}).get("number") or 0)
+        ai_depth  = (props.get("AI Depth Score", {}).get("number") or 0)
+        ownership = (props.get("Ownership Score", {}).get("number") or 0)
         skill_match = (props.get("Skill Match %", {}).get("number") or 0)
 
+        # Company Tier: extract number from "Tier1/Tier2/Tier3" or "Level1/Level2/Level3"
         import re as _re
         role_tier_raw = (props.get("Role Tier", {}).get("select") or {}).get("name", "")
         tier_m = _re.search(r"[123]", role_tier_raw)
-        company_tier_val = (4 - int(tier_m.group())) if tier_m else 0
+        company_tier_val = (4 - int(tier_m.group())) if tier_m else 0  # Tier1=3, Tier2=2, Tier3=1
 
+        # Salary penalty: ถ้า salary_max < 80000 หัก 1 คะแนน
         salary_max = props.get("Salary Max", {}).get("number") or 0
         salary_penalty = 1 if (salary_max > 0 and salary_max < 80000) else 0
 
+        # Formula: fit×3 + ai_depth×2 + ownership×2 + company_tier×1 + skill_match/20 - salary_penalty
         score = (fit_s * 3) + (ai_depth * 2) + (ownership * 2) + company_tier_val + (skill_match / 20) - salary_penalty
-        return -score
+        return -score  # negative for ascending sort
 
     jobs_sorted = sorted(jobs, key=job_score)
     for rank, job in enumerate(jobs_sorted, start=1):
@@ -634,6 +699,7 @@ with tab1:
 
 
 # --- TAB 2 ---
+# --- TAB 2 ---
 with tab2:
     st.subheader("📋 Job Info")
     col1, col2 = st.columns(2)
@@ -647,11 +713,12 @@ with tab2:
         salary_min    = st.number_input("Salary Min (฿)", min_value=0, step=1000, value=0)
         salary_max    = st.number_input("Salary Max (฿)", min_value=0, step=1000, value=0)
 
-    job_url        = st.text_input("Job URL", placeholder="https://th.jobsdb.com/job/...")
+    # ปรับเหลือแค่ช่อง Job URL ช่องเดียวแมปกับ Notion
+    job_url       = st.text_input("Job URL", placeholder="https://th.jobsdb.com/job/...")
     key_tech_stack = st.text_input("Key Tech Stack", placeholder="SQL, Python, Tableau")
-    gaps           = st.text_area("Gaps to Address", placeholder="สิ่งที่ขาด / ต้องเตรียม", height=80)
-    job_notes      = st.text_area("Job Notes", placeholder="หมายเหตุเพิ่มเติม", height=80)
-    analysis       = st.text_area("AI Analysis", placeholder="วาง AI analysis ได้เลยค่ะ", height=120)
+    gaps          = st.text_area("Gaps to Address", placeholder="สิ่งที่ขาด / ต้องเตรียม", height=80)
+    job_notes     = st.text_area("Job Notes", placeholder="หมายเหตุเพิ่มเติม", height=80)
+    analysis      = st.text_area("AI Analysis", placeholder="วาง AI analysis ได้เลยค่ะ", height=120)
 
     st.markdown("---")
     st.subheader("🏢 Company Info")
@@ -884,6 +951,7 @@ apply_decision logic:
 
 
 def _extract_text_from_html(html, url):
+    """แยก text จาก HTML โดย detect site-specific selectors ก่อน"""
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "nav", "header", "footer", "iframe"]):
         tag.decompose()
@@ -903,6 +971,7 @@ def _extract_text_from_html(html, url):
 
 
 def _fetch_with_scraperapi(url):
+    """Layer 1: ScraperAPI — bypass anti-bot ผ่าน proxy"""
     if not SCRAPERAPI_KEY:
         return None, "ScraperAPI: ไม่มี key"
     try:
@@ -923,6 +992,7 @@ def _fetch_with_scraperapi(url):
 
 
 def _fetch_with_requests(url):
+    """Layer 2: requests ธรรมดา — fallback สุดท้าย"""
     hdrs = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -955,6 +1025,10 @@ def _fetch_with_requests(url):
 
 
 def fetch_jd(url):
+    """
+    Returns (content, error_message). error_message is None on success.
+    ลำดับ: ScraperAPI → requests ธรรมดา
+    """
     if "facebook.com" in url:
         return None, "Facebook URL — กรุณา copy JD มาวางเองค่ะ"
     if "linkedin.com" in url:
@@ -970,27 +1044,43 @@ def fetch_jd(url):
     return None, " | ".join(errors)
 
 def _trim_prompt(prompt, target_chars):
+    """ย่อ prompt โดยตัด section ที่ใหญ่และ optional ก่อน — ไม่ตัดกลางๆ"""
     if len(prompt) <= target_chars:
         return prompt
+    # 1. ย่อ COMPANY RESEARCH ก่อน (ใหญ่สุด + optional)
     m = re.search(r'(══ COMPANY RESEARCH.*?)(\n══)', prompt, re.DOTALL)
     if m and len(prompt) > target_chars:
-        keep = max(200, int((target_chars - (len(prompt) - len(m.group(1))))))
+        keep = max(200, int((target_chars - (len(prompt) - len(m.group(1)))))  )
         prompt = prompt[:m.start(1)] + m.group(1)[:keep] + "\n...(ตัดทอน)\n" + prompt[m.end(1):]
+    # 2. ถ้ายังใหญ่อยู่ ย่อ JD DATA
     m2 = re.search(r'(══ JD DATA.*?)(\n══)', prompt, re.DOTALL)
     if m2 and len(prompt) > target_chars:
         keep2 = max(200, int((target_chars - (len(prompt) - len(m2.group(1))))))
         prompt = prompt[:m2.start(1)] + m2.group(1)[:keep2] + "\n...(ตัดทอน)\n" + prompt[m2.end(1):]
+    # 3. สุดท้าย hard cut (กรณี edge case)
     return prompt[:target_chars] if len(prompt) > target_chars else prompt
 
 
 def _call_llm_raw(prompt, retries=2):
+    """Low-level LLM call — returns raw text string or raises RuntimeError
+    ใช้ Groq API (ฟรี) — llama-3.3-70b-versatile
+
+    Rate limit strategy (Groq Free tier):
+    - 429 → รอตาม retry-after header จริงๆ (ไม่จำกัดรอบ) แล้วลองใหม่ใน model เดิม
+    - ถ้า retry-after > 120 วินาที → switch model ทันที
+    - 413 → ย่อ company_research / JD section แล้วลองใหม่ (ไม่ตัด prompt ตรงๆ)
+    - 400 → likely context too long → switch model ทันที
+    - 503/529 → backoff สั้น แล้วลองใหม่
+    """
     if not GROQ_API_KEY:
         raise RuntimeError("ไม่มี GROQ_API_KEY ใน secrets")
 
+    # (model, max_tokens_output, context_char_limit)
+    # context_char_limit ≈ 80% ของ context window จริง แปลงคร่าวๆ 1 token ≈ 3 chars
     models = [
-        ("llama-3.3-70b-versatile", 4096, 393216),
-        ("llama-3.1-8b-instant",    4096, 393216),
-        ("gemma2-9b-it",            2048,  24576),
+        ("llama-3.3-70b-versatile", 4096, 393216),  # 128k context
+        ("llama-3.1-8b-instant",    4096, 393216),  # 128k context
+        ("gemma2-9b-it",            2048,  24576),  # 8k context — ตั้ง max_tokens ต่ำกว่า
     ]
     last_err = ""
     current_prompt = prompt
@@ -1000,6 +1090,7 @@ def _call_llm_raw(prompt, retries=2):
         rate_limit_count = 0
         trim_count = 0
 
+        # ถ้า prompt ใหญ่เกิน context ของ model นี้ → ย่อก่อนส่ง
         if len(current_prompt) > ctx_limit:
             current_prompt = _trim_prompt(current_prompt, ctx_limit)
 
@@ -1049,6 +1140,7 @@ def _call_llm_raw(prompt, retries=2):
                     break
 
                 if status == 400:
+                    # Bad request — likely context too long หรือ parameter ไม่รองรับ → switch model
                     last_err = f"{model} 400 → switching model"
                     break
 
@@ -1059,6 +1151,7 @@ def _call_llm_raw(prompt, retries=2):
                         continue
                     break
 
+                # HTTP error อื่น → switch model
                 break
 
             except requests.exceptions.Timeout:
@@ -1073,6 +1166,7 @@ def _call_llm_raw(prompt, retries=2):
     raise RuntimeError(f"Groq ล้มเหลวทุก model — {last_err}")
 
 
+# Prompt สำหรับ Call 1 — extract facts จาก JD เท่านั้น ไม่ต้องรู้จัก candidate
 JD_EXTRACT_PROMPT = """
 Extract structured information from the job description below.
 Reply ONLY with valid JSON. No markdown. No backticks. No extra text.
@@ -1117,6 +1211,7 @@ JSON structure to return:
 }}
 """
 
+# Prompt สำหรับ Call 2 — วิเคราะห์ fit กับ candidate โดยใช้ extracted data
 FIT_ANALYSIS_PROMPT = """
 คุณคือ career advisor อาวุโสที่รู้จัก Thapanee (ทับทิม) ดีมาก
 วิเคราะห์ job ด้านล่างให้เธออย่างตรงไปตรงมา เหมือนเพื่อนที่ทำงาน HR มาบอก
@@ -1166,6 +1261,19 @@ apply_decision:
   WATCHLIST = fit_level medium + มีข้อดีชัดเจน
   PASS      = มี dealbreaker ชัด หรือ fit_level low/low-medium
 
+══ SALARY ESTIMATION (สำคัญ) ══
+ดูที่ "salary_min" / "salary_max" ใน JOB DATA ด้านบน
+- ถ้ามีค่าระบุชัดเจนแล้ว (ไม่ใช่ null) → ใส่ "salary_min"/"salary_max" ใน output เป็นค่าเดิมนั้น (ห้ามเปลี่ยน)
+- ถ้าเป็น null (JD ไม่ได้บอกเงินเดือน) → ประมาณเงินเดือนที่เหมาะสมเป็น "salary_min"/"salary_max" (หน่วย THB)
+  โดยพิจารณาจาก:
+  • company_size / company_tier / industry จาก JOB DATA และ company research
+  • role_tier และ requirements ใน JD (entry-level, fresh grad welcome, years required)
+  • ตลาดเงินเดือนจริงสำหรับ fresh grad / entry-level developer ในกรุงเทพฯ ปี 2025-2026
+    (ทั่วไปอยู่ที่ประมาณ 25,000-45,000 บาท สำหรับ fresh grad SWE/AI roles ขึ้นกับขนาดบริษัท)
+  • salary target ของทับทิม (35,000-45,000 บาท, floor 30,000) เป็น reference จุดหนึ่ง ไม่ใช่ค่าตายตัว
+  ใส่ "salary_is_estimated": true และเขียนเหตุผลสั้นๆ ไว้ใน "salary_estimate_reason"
+- ถ้าทั้งคู่มีค่าแล้ว (ไม่ null) → ใส่ "salary_is_estimated": false และ "salary_estimate_reason": ""
+
 ══ OUTPUT FORMAT ══
 ตอบกลับเป็น JSON เท่านั้น ห้ามมี markdown backticks:
 
@@ -1174,6 +1282,10 @@ apply_decision:
   "role_tier_reason": "เหตุผล 1 ประโยคว่าทำไมถึงเป็น Tier นี้",
   "fit_level": "high/medium-high/medium/low-medium/low",
   "my_skill_match_pct": 75,
+  "salary_min": 0,
+  "salary_max": 0,
+  "salary_is_estimated": false,
+  "salary_estimate_reason": "",
   "ai_depth_score": 3,
   "ownership_score": 3,
   "gap_skills": ["skill ที่ขาดจริงๆ"],
@@ -1206,6 +1318,7 @@ apply_decision:
 
 
 def _scrape_text(url, max_chars=2000):
+    """ดึง text จาก URL ด้วย ScraperAPI ก่อน แล้ว fallback requests"""
     text, _ = _fetch_with_scraperapi(url) if SCRAPERAPI_KEY else (None, "no key")
     if not text:
         text, _ = _fetch_with_requests(url)
@@ -1213,11 +1326,16 @@ def _scrape_text(url, max_chars=2000):
 
 
 def research_company(company_name, website=""):
+    """
+    ดึงข้อมูลบริษัทจาก web จริงๆ — ใช้ ScraperAPI ที่มีอยู่แล้ว
+    คืน string สรุปข้อมูลที่ดึงได้ หรือ "ไม่พบข้อมูล" ถ้าทำไม่ได้
+    """
     if not company_name or company_name.lower() in ("unknown", "not specified", ""):
         return "ไม่ทราบชื่อบริษัท — ไม่สามารถ research ได้"
 
     sections = []
 
+    # ── 1. Google search: บริษัท + glassdoor/crunchbase/linkedin ──
     search_queries = [
         f"{company_name} Thailand company review Glassdoor",
         f"{company_name} funding revenue crunchbase",
@@ -1226,9 +1344,11 @@ def research_company(company_name, website=""):
     for query in search_queries:
         try:
             encoded = requests.utils.quote(query, safe="")
+            # ใช้ DuckDuckGo HTML (ไม่มี API key) เป็น free search
             ddg_url = f"https://html.duckduckgo.com/html/?q={encoded}"
             soup_text = _scrape_text(ddg_url, max_chars=1500)
             if soup_text and len(soup_text) > 100:
+                # ตัดเอาแค่ snippet ที่ mention ชื่อบริษัท
                 lines = [l.strip() for l in soup_text.splitlines()
                          if company_name.lower()[:6] in l.lower() and len(l.strip()) > 30]
                 if lines:
@@ -1236,9 +1356,11 @@ def research_company(company_name, website=""):
         except Exception:
             pass
 
+    # ── 2. เว็บบริษัทโดยตรง (About / Careers page) ──
     targets = []
     if website:
         targets.append(website)
+        # ลอง /about และ /careers ด้วย
         base = website.rstrip("/")
         targets += [f"{base}/about", f"{base}/about-us", f"{base}/careers"]
 
@@ -1247,10 +1369,11 @@ def research_company(company_name, website=""):
             text = _scrape_text(url, max_chars=1500)
             if text and len(text) > 150:
                 sections.append(f"[เว็บบริษัท: {url[:60]}]\n{text[:1500]}")
-                break
+                break  # ได้แล้วพอ
         except Exception:
             pass
 
+    # ── 3. Glassdoor direct search ──
     try:
         gd_url = f"https://www.glassdoor.com/Search/results.htm?keyword={requests.utils.quote(company_name)}"
         gd_text = _scrape_text(gd_url, max_chars=1500)
@@ -1270,6 +1393,7 @@ def research_company(company_name, website=""):
 
 
 def analyze_with_llm(jd_text, retries=2, known_company_name=""):
+    # ── Call 1: Extract job facts จาก JD (~2000 tokens) ────
     extract_prompt = JD_EXTRACT_PROMPT.format(jd_text=jd_text[:6000])
     try:
         raw1 = _call_llm_raw(extract_prompt, retries=retries)
@@ -1277,19 +1401,25 @@ def analyze_with_llm(jd_text, retries=2, known_company_name=""):
         raw1 = re.sub(r"```\s*$", "", raw1.strip())
         job_facts = json.loads(raw1)
     except json.JSONDecodeError:
+        # ถ้า parse ไม่ได้ ลอง repair ก่อน แล้วค่อย fallback
         job_facts = _parse_llm_json(raw1) if 'raw1' in locals() else {}
         if not job_facts.get("company_name"):
             job_facts["raw_jd"] = jd_text[:2000]
     except RuntimeError as e:
         return {"error": str(e), "job_title": "Unknown", "company_name": "Unknown"}
 
+    # ── ถ้าผู้ใช้กรอกชื่อบริษัทมาเอง (เช่น แปะ JD จาก Facebook + กรอก Company ใน Notion)
+    #    ให้เชื่อชื่อนั้นเสมอ — แม่นยำกว่า LLM เดาจาก JD ที่อาจไม่มีชื่อบริษัทระบุชัด
     if known_company_name and known_company_name.strip():
         job_facts["company_name"] = known_company_name.strip()
 
+    # ── Call 1.5: Research บริษัทจาก web ────────────────────
+    # ลอง regex fallback ก่อน research เพื่อให้ได้ชื่อบริษัทที่ดีขึ้น
     company_name = job_facts.get("company_name", "")
     website      = job_facts.get("website", "")
     UNKNOWN_NAMES = {"", "not specified", "unknown", "none", "n/a"}
     if company_name.lower() in UNKNOWN_NAMES:
+        # ลอง regex ใน JD ก่อน research (เพื่อไม่เสีย ScraperAPI credits)
         for pat in [
             r"บริษัท\s+([^\s][^\n]+?)(?:\s+จำกัด|\s+\(มหาชน\)|$)",
             r"(?:company|employer|posted by|hiring company)\s*[:\-]\s*(.+)",
@@ -1304,16 +1434,20 @@ def analyze_with_llm(jd_text, retries=2, known_company_name=""):
                     company_name = candidate
                     job_facts["company_name"] = company_name
                     break
-
+    # วิจัยบริษัทเฉพาะเมื่อมีชื่อชัดเจน — ไม่เปลือง ScraperAPI credits กับ "Not specified"
     if company_name.lower() not in UNKNOWN_NAMES:
         company_research = research_company(company_name, website)
     else:
+        # ── ไม่รู้ชื่อบริษัทแม้ลอง regex แล้ว และไม่มี known_company_name ──
+        # หยุดตรงนี้ ไม่เรียก Call 2 (fit analysis) เพื่อไม่เปลือง token
+        # ให้ผู้ใช้กรอกชื่อบริษัทใน Notion (field Company) ก่อน แล้วเปลี่ยน status เป็น llm_error เพื่อ retry
         return {
             "error": "no_company",
             "job_title": job_facts.get("job_title", "Unknown"),
             "company_name": "Unknown",
         }
 
+    # ── Call 2: วิเคราะห์ fit (~3500 tokens) ───────────────
     fit_prompt = FIT_ANALYSIS_PROMPT.format(
         profile=CANDIDATE_PROFILE,
         job_data_json=json.dumps(job_facts, ensure_ascii=False, indent=2),
@@ -1327,8 +1461,10 @@ def analyze_with_llm(jd_text, retries=2, known_company_name=""):
     except RuntimeError as e:
         return {"error": str(e), "job_title": "Unknown", "company_name": "Unknown"}
 
+    # ── Merge: fit_data เป็น base, job_facts ชนะสำหรับ key ที่มีค่าจริง ──
     result = {**fit_data, **job_facts}
 
+    # สำหรับทุก key: ใช้ค่าแรกที่ไม่ว่างจาก job_facts → fit_data → default
     CORE_KEYS = [
         ("job_title",      "Unknown"),
         ("company_name",   "Not specified"),
@@ -1346,22 +1482,29 @@ def analyze_with_llm(jd_text, retries=2, known_company_name=""):
     for key, default in CORE_KEYS:
         result[key] = job_facts.get(key) or fit_data.get(key) or default
 
+    # ── Validate company_name — ถ้ายัง "Not specified" / ว่าง ให้ retry extract จาก JD โดยตรง
     cn = result.get("company_name", "")
     if not cn or cn.lower() in ("not specified", "unknown", ""):
+        # พยายามดึงชื่อบริษัทจาก JD ด้วย regex เป็น last resort
         company_patterns = [
+            # Thai patterns
             r"บริษัท\s+([^\s][^\n]+?)(?:\s+จำกัด|\s+\(มหาชน\)|$)",
             r"(?:สมัครงานที่|ร่วมงานกับ|ทำงานกับ)\s+([A-Za-zก-๛][^\n]{2,40})",
+            # English patterns
             r"(?:company|employer|organization|posted by|hiring company)\s*[:\-]\s*(.+)",
             r"(?:about|join|at|work at|careers at)\s+([A-Z][A-Za-z0-9\s&\.]{2,40}?)(?:\n|,|\.|$)",
             r"©\s*(?:\d{4}\s+)?([A-Za-z][A-Za-z0-9\s&\.]{2,40}?)(?:\s|,|\.|All rights)",
+            # Email domain
             r"[\w\.\+]+@([a-z0-9\-]+)\.[a-z]{2,}",
         ]
         for pat in company_patterns:
             m = re.search(pat, jd_text[:4000], re.IGNORECASE | re.MULTILINE)
             if m:
                 candidate = m.group(1).strip()[:80]
+                # กรณี email domain → capitalize
                 if "@" in pat:
                     candidate = candidate.split(".")[0].capitalize()
+                # กรอง false positives
                 SKIP_WORDS = {"apply", "job", "position", "role", "work", "us", "the", "our"}
                 if len(candidate) > 2 and candidate.lower() not in SKIP_WORDS:
                     result["company_name"] = candidate
@@ -1371,6 +1514,7 @@ def analyze_with_llm(jd_text, retries=2, known_company_name=""):
 
 
 def _parse_llm_json(raw):
+    """Parse JSON จาก LLM — พยายาม repair ถ้าถูกตัด"""
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -1383,6 +1527,14 @@ def _parse_llm_json(raw):
         def extract(field, default=""):
             m = re.search(rf'"{field}"\s*:\s*"([^"]*)"', raw)
             return m.group(1) if m else default
+        def extract_num(field, default=None):
+            m = re.search(rf'"{field}"\s*:\s*(-?\d+(?:\.\d+)?|null)', raw)
+            if not m or m.group(1) == "null":
+                return default
+            return float(m.group(1)) if "." in m.group(1) else int(m.group(1))
+        def extract_bool(field, default=False):
+            m = re.search(rf'"{field}"\s*:\s*(true|false)', raw)
+            return (m.group(1) == "true") if m else default
         return {
             "job_title":      extract("job_title", "Unknown"),
             "company_name":   extract("company_name", "Unknown"),
@@ -1400,6 +1552,10 @@ def _parse_llm_json(raw):
             "apply_url":      extract("apply_url", ""),
             "apply_email":    extract("apply_email", ""),
             "platform":       extract("platform", ""),
+            "salary_min":          extract_num("salary_min", None),
+            "salary_max":          extract_num("salary_max", None),
+            "salary_is_estimated": extract_bool("salary_is_estimated", False),
+            "salary_estimate_reason": extract("salary_estimate_reason", ""),
             "error": "JSON truncated — partial data recovered"
         }
 
@@ -1427,6 +1583,7 @@ def analysis_to_notion_dicts(a, job_url):
     if a.get("resume_version"):
         parts.append(f"\n--- RESUME ---\nใช้: {a['resume_version']}\nเหตุผล: {a.get('resume_reason','')}")
 
+    # ── clean role_tier: เอาแค่ Tier1/Tier2/Tier3 ──────────────
     import re as _re
     raw_tier = a.get("role_tier", "")
     tier_reason = a.get("role_tier_reason", "")
@@ -1440,10 +1597,21 @@ def analysis_to_notion_dicts(a, job_url):
     else:
         clean_tier = raw_tier
 
+    # merge tier_reason เข้า notes
     base_notes = a.get("notes", "")
     notes_parts_list = [p for p in [base_notes, tier_reason] if p]
+
+    # ถ้า salary เป็นค่าประมาณ (ไม่ใช่ระบุใน JD) → ใส่หมายเหตุไว้
+    if a.get("salary_is_estimated") and (a.get("salary_min") or a.get("salary_max")):
+        est_reason = a.get("salary_estimate_reason", "")
+        est_note = "💰 เงินเดือนเป็นค่าประมาณ (JD ไม่ได้ระบุ)"
+        if est_reason:
+            est_note += f": {est_reason}"
+        notes_parts_list.append(est_note)
+
     merged_notes = " | ".join(notes_parts_list)[:500]
 
+    # ปรับเหลือแค่ job_url หลักชิ้นเดียว
     job_data = {
         "job_title":       a.get("job_title", "Unknown"),
         "role_tier":       clean_tier,
@@ -1484,16 +1652,18 @@ with tab3:
     if not GROQ_API_KEY:
         st.warning("⚠️ ยังไม่มี `GROQ_API_KEY` ใน Streamlit Secrets ค่ะ")
 
+    # ── Settings ─────────────────────────────────────────────
     with st.expander("⚙️ Settings", expanded=False):
         delay = st.slider("หน่วงเวลาระหว่าง request (วินาที)", 5, 30, 12,
                           help="แนะนำ 12+ วินาที เพื่อหลีกเลี่ยง Groq rate limit")
 
+    # ── Debug: แสดง property map จริงจาก Notion ─────────────
     if JOB_LISTING_DB_ID:
         with st.expander("🔍 Debug: Notion field map", expanded=False):
             if st.button("รีเฟรช field map", key="btn_bust_pmap"):
                 get_listing_property_map.clear()
                 get_listing_status_map.clear()
-                load_options.clear()
+                load_options.clear()  # clear select options ด้วย (Company Size, Role Tier ฯลฯ)
             pmap_debug = get_listing_property_map()
             smap_debug = get_listing_status_map()
             st.json({"property_map": pmap_debug, "status_map": smap_debug})
@@ -1504,58 +1674,19 @@ with tab3:
     # SECTION A — ดึงจาก Job Listing DB (main flow)
     # ══════════════════════════════════════════════════════════
     def fetch_pending_listings():
-        """
-        ดึง rows จาก Job Listing DB ที่ยังรอประมวลผล
-        พร้อมแนบ flag เพื่อบอก pipeline ว่าต้อง skip fetch หรือ skip LLM
-
-        สถานะและพฤติกรรมที่ต้องการ:
-        ┌──────────────┬─────────────┬──────────┬──────────┐
-        │ Status       │ หยิบมา?     │ skip     │ skip     │
-        │              │             │ fetch?   │ LLM?     │
-        ├──────────────┼─────────────┼──────────┼──────────┤
-        │ (ว่าง/ใหม่) │ ✅           │ ❌        │ ❌        │
-        │ consider     │ ✅           │ ✅ (ใช้ JD│ ❌        │
-        │              │             │ ที่มีอยู่)│          │
-        │ llm_error    │ ✅           │ ✅ (ใช้ JD│ ❌        │
-        │              │             │ ที่มีอยู่)│          │
-        │ added        │ ❌           │ -        │ -        │
-        │ fetch_error  │ ❌           │ -        │ -        │
-        │ need_company │ ❌           │ -        │ -        │
-        └──────────────┴─────────────┴──────────┴──────────┘
-
-        หมายเหตุ: consider และ llm_error ต่างกันตรงที่
-        - consider = fetch JD สำเร็จแต่ยังไม่ได้ push Notion → skip fetch, run LLM
-        - llm_error = fetch JD สำเร็จแต่ LLM ล้มเหลว → skip fetch, retry LLM
-        ทั้งคู่ skip fetch เหมือนกัน แต่ต้อง run LLM ทั้งคู่
-        """
+        """ดึง rows ใน Job Listing DB ที่ยังไม่มีสถานะ ใช้ชื่อ field จริงจาก pmap"""
         if not JOB_LISTING_DB_ID:
             return [], "ไม่มี JOB_LISTING_DB_ID"
         try:
             pmap = get_listing_property_map()
-            status_field  = pmap.get("status", "Status")
-            status_type   = pmap.get("status_type", "select")
-            url_field     = pmap.get("url", "URL")
-            name_field    = pmap.get("name", "Name")
-            jd_field      = pmap.get("jd", "JD")
+            status_field = pmap.get("status", "Status")
+            status_type  = pmap.get("status_type", "select")
+            url_field    = pmap.get("url", "URL")
+            name_field   = pmap.get("name", "Name")
+            jd_field     = pmap.get("jd", "JD")
             company_field = pmap.get("company", "Company")
 
-            status_map     = get_listing_status_map()
-            # reverse map: display name (lowered) → canonical key
-            # e.g. "llm error" → "llm_error", "consider" → "consider"
-            display_to_key = {v.lower(): k for k, v in status_map.items()}
-            # fallback: canonical key itself (in case Notion stores the key)
-            display_to_key.update({k: k for k in status_map})
-
-            # สถานะที่ "เสร็จแล้ว" — ไม่หยิบมาทำซ้ำ
-            DONE_STATUSES = {"added", "fetch_error", "need_company"}
-
-            # สถานะ "ว่าง" — ถือเป็น pending ใหม่ (fetch + LLM ทุกขั้น)
-            EMPTY_STATUS_VALUES = {"", "no status", "no apply status", "none", "-"}
-
-            # สถานะที่ retry ได้ — skip fetch แต่ run LLM
-            SKIP_FETCH_STATUSES = {"llm_error", "consider"}
-
-            # Paginate ทุก row
+            # ── Paginate ทุก row (ไม่มี limit 100) ─────────────
             rows = []
             payload = {"page_size": 100}
             while True:
@@ -1569,67 +1700,58 @@ with tab3:
                     break
                 payload["start_cursor"] = data["next_cursor"]
 
+            # สถานะที่ "เสร็จแล้ว" หรือ ต้องรอแก้ไขด้วยมือก่อน → ข้ามถาวร (auto-queue ไม่หยิบ)
+            # need_company: รอผู้ใช้กรอกชื่อบริษัทใน Notion แล้วเปลี่ยนเป็น llm_error เพื่อ retry เอง
+            DONE_STATUSES = {"added", "fetch_error", "need_company"}
+            # สถานะที่ "ว่าง" → ถือว่า pending ใหม่
+            EMPTY_STATUS_VALUES = {"", "no status", "no apply status", "none", "-"}
+            # llm_error / consider → retry ได้ (JD ดึงมาได้แล้ว แต่ LLM พัง หรือยัง push ไม่สำเร็จ)
+
             pending = []
             for row in rows:
                 props = row.get("properties", {})
 
-                # อ่าน status value
+                # ── อ่าน status ด้วยชื่อ field จริง ──────────────
                 sp = props.get(status_field, {})
                 sel = sp.get("select") or sp.get("status") or {}
-                status_val   = (sel.get("name") or "").strip()
-                status_lower = status_val.lower().strip()
+                status_val = (sel.get("name") or "").strip()
+                status_lower = status_val.lower()
 
-                # normalize display name → canonical key
-                canonical_key = display_to_key.get(status_lower, status_lower)
-
-                # ข้าม row ที่ done แล้ว
-                if canonical_key in DONE_STATUSES:
+                # ข้าม row ที่เสร็จแล้ว หรือ URL ใช้ไม่ได้ถาวร (consider/added/not_apply/fetch_error)
+                if status_lower in DONE_STATUSES:
                     continue
+                if status_lower not in EMPTY_STATUS_VALUES:
+                    # retry เฉพาะ llm_error และ consider — JD ดึงมาได้แล้วแต่ LLM พัง หรือยังไม่ apply
+                    # fetch_error / added ข้ามถาวรแล้ว (อยู่ใน DONE_STATUSES)
+                    is_retryable = status_lower in ("llm_error", "consider")
+                    if not is_retryable:
+                        continue  # status ที่ไม่รู้จัก → ข้าม
 
-                # กำหนด flag ตาม canonical_key
-                if status_lower in EMPTY_STATUS_VALUES:
-                    # งานใหม่ ทำทุกขั้น
-                    skip_fetch = False
-                elif canonical_key in SKIP_FETCH_STATUSES:
-                    # มี JD แล้ว แต่ยังไม่ได้ push หรือ LLM ล้มเหลว
-                    # → skip fetch, run LLM ใหม่
-                    skip_fetch = True
-                else:
-                    # สถานะอื่นที่ไม่รู้จัก — ข้ามไปก่อน
-                    continue
-
-                # URL (required)
-                up  = props.get(url_field, {})
+                # ── URL ──────────────────────────────────────────
+                up = props.get(url_field, {})
                 url = (up.get("url") or "").strip()
                 if not url:
                     continue
 
-                # Name
-                np        = props.get(name_field, {})
+                # ── Name ─────────────────────────────────────────
+                np = props.get(name_field, {})
                 title_arr = np.get("title", [])
-                name      = title_arr[0].get("plain_text", "") if title_arr else ""
+                name = title_arr[0].get("plain_text", "") if title_arr else ""
 
-                # JD (ถ้ามีอยู่แล้วใน Notion)
-                jp      = props.get(jd_field, {})
+                # ── JD ───────────────────────────────────────────
+                jp = props.get(jd_field, {})
                 jd_arr  = jp.get("rich_text", [])
                 jd_text = jd_arr[0].get("plain_text", "") if jd_arr else ""
 
-                # Company hint (ถ้าผู้ใช้กรอกไว้เอง)
-                cp          = props.get(company_field, {})
+                # ── Company (ถ้าผู้ใช้กรอกไว้เอง — ใช้ override การเดาของ LLM) ──
+                cp = props.get(company_field, {})
                 company_arr = cp.get("rich_text", []) or cp.get("title", [])
                 company_name_hint = company_arr[0].get("plain_text", "").strip() if company_arr else ""
 
                 pending.append({
-                    "notion_id":          row["id"],
-                    "url":                url,
-                    "name":               name or url[:60],
-                    "jd_text":            jd_text,
-                    "company_name_hint":  company_name_hint,
-                    "canonical_status":   canonical_key,
-                    # ── flags ──
-                    "skip_fetch":         skip_fetch,
-                    # LLM รันเสมอสำหรับ pending ทุกตัว
-                    # (ทั้ง consider และ llm_error ต้องการ LLM)
+                    "notion_id": row["id"], "url": url,
+                    "name": name or url[:60], "jd_text": jd_text,
+                    "company_name_hint": company_name_hint,
                 })
             return pending, None
         except Exception as e:
@@ -1661,14 +1783,8 @@ with tab3:
 
             with st.expander(f"ดูรายการทั้งหมด ({len(queue)} งาน)", expanded=False):
                 for i, q_job in enumerate(queue, 1):
-                    status_badge = q_job.get("canonical_status", "new")
                     has_jd = " *(มี JD แล้ว)*" if q_job.get("jd_text") else ""
-                    skip_badge = " `[skip fetch]`" if q_job.get("skip_fetch") else ""
-                    st.caption(
-                        f"{i}. {q_job['name'][:70]}  •  "
-                        f"`{q_job['url'][:50]}`  •  "
-                        f"`{status_badge}`{has_jd}{skip_badge}"
-                    )
+                    st.caption(f"{i}. {q_job['name'][:80]}  •  `{q_job['url'][:55]}`{has_jd}")
 
             if st.button(f"🚀 วิเคราะห์ {len(queue)} งาน → Push Notion อัตโนมัติ",
                          key="btn_run_queue", type="primary"):
@@ -1705,10 +1821,7 @@ with tab3:
                     base = u.split("?")[0].rstrip("/")
                     if base not in seen_m:
                         seen_m.add(base)
-                        manual_jobs.append({
-                            "url": u, "name": u[:60],
-                            "skip_fetch": False,
-                        })
+                        manual_jobs.append({"url": u, "name": u[:60]})
                 if manual_jobs:
                     st.caption(f"พบ {len(manual_jobs)} URL")
         else:
@@ -1720,11 +1833,7 @@ with tab3:
                                   key="manual_jd_text")
             if m_jd.strip():
                 ref = m_url.strip() or f"manual://jd-{hash(m_jd[:100]) % 100000}"
-                manual_jobs.append({
-                    "url": ref, "name": ref[:60],
-                    "jd_text": m_jd.strip(),
-                    "skip_fetch": True,   # มี JD อยู่แล้ว ไม่ต้อง fetch
-                })
+                manual_jobs.append({"url": ref, "name": ref[:60], "jd_text": m_jd.strip()})
                 st.caption("พบ 1 JD พร้อมวิเคราะห์")
 
         if manual_jobs:
@@ -1733,7 +1842,7 @@ with tab3:
                 source = "manual"
 
     # ══════════════════════════════════════════════════════════
-    # SECTION C — Pipeline ประมวลผล
+    # SECTION C — Pipeline ประมวลผล (ทำงานเมื่อกดปุ่มใดก็ตาม)
     # ══════════════════════════════════════════════════════════
     if jobs_to_run:
         st.markdown("---")
@@ -1750,130 +1859,96 @@ with tab3:
             log_area.code("\n".join(logs[-30:]))
 
         for i, job in enumerate(jobs_to_run):
-            url         = job["url"]
-            name        = job.get("name") or url[:50]
-            skip_fetch  = job.get("skip_fetch", False)
-
+            url  = job["url"]
+            name = job.get("name") or url[:50]
             progress.progress(i / len(jobs_to_run), text=f"[{i+1}/{len(jobs_to_run)}] {name[:40]}...")
             add_log(f"\n[{i+1}/{len(jobs_to_run)}] {name[:55]}")
 
-            # ── STEP 1: Get JD ──────────────────────────────────────────────────
-            jd = ""
             if job.get("jd_text"):
-                # มี JD ใน job object อยู่แล้ว (จาก Notion field หรือ manual paste)
                 jd = job["jd_text"]
                 add_log(f"  📋 ใช้ JD ที่มีอยู่แล้ว ({len(jd)} chars)")
-
-            elif skip_fetch:
-                # skip_fetch=True แต่ไม่มี JD → แจ้งเตือนและ force fetch
-                add_log(f"  ⚠️ skip_fetch=True แต่ไม่มี JD ใน record — force fetch")
-                jd, fetch_err = fetch_jd(url)
-                if fetch_err or not jd:
-                    add_log(f"  ❌ Fetch failed: {fetch_err}")
-                    stats["err"] += 1
-                    results.append({"url": url, "name": name, "status": "error", "error": fetch_err})
-                    if JOB_LISTING_DB_ID:
-                        _uid, _uerr = upsert_job_listing(
-                            url, status_key="fetch_error",
-                            error_note=f"Fetch failed (force): {fetch_err}"
-                        )
-                        if _uerr:
-                            add_log(f"  ⚠️ Listing update failed: {_uerr}")
-                        else:
-                            add_log(f"  📋 Listing: fetch_error")
-                    if i < len(jobs_to_run) - 1:
-                        time.sleep(delay)
-                    continue
-
             else:
-                # งานใหม่ — fetch JD จาก URL
                 add_log(f"  🌐 Fetching JD...")
                 jd, fetch_err = fetch_jd(url)
-                if fetch_err or not jd:
+                if fetch_err:
                     add_log(f"  ❌ Fetch failed: {fetch_err}")
                     stats["err"] += 1
                     results.append({"url": url, "name": name, "status": "error", "error": fetch_err})
                     if JOB_LISTING_DB_ID:
-                        _uid, _uerr = upsert_job_listing(
-                            url, status_key="fetch_error",
-                            error_note=f"Fetch failed: {fetch_err}"
-                        )
+                        # ตั้ง status = "fetch_error" เพื่อให้ออกจาก queue ถาวร
+                        # (fetch_pending_listings กรอง "no status" เท่านั้น → งานนี้จะไม่วนกลับมา)
+                        _uid, _uerr = upsert_job_listing(url, status_key="fetch_error",
+                                           error_note=f"Fetch failed: {fetch_err}")
                         if _uerr:
                             add_log(f"  ⚠️ Listing update failed: {_uerr}")
                         else:
-                            add_log(f"  📋 Listing: fetch_error (ออกจาก queue แล้ว)")
+                            add_log(f"  📋 Listing: fetch_error (ออกจาก queue แล้ว — retry ได้ใส่ JD เองด้านล่าง)")
                     if i < len(jobs_to_run) - 1:
                         time.sleep(delay)
                     continue
-
                 add_log(f"  📄 {jd[:80].replace(chr(10),' ')}...")
 
-                # บันทึก JD กลับ Notion (consider) เพื่อให้ retry LLM ได้
-                # โดยไม่ต้อง fetch ซ้ำถ้า LLM ล้มเหลวรอบนี้
-                if JOB_LISTING_DB_ID:
-                    upsert_job_listing(url, jd_raw=jd[:2000], status_key="consider")
-                    add_log(f"  📋 Listing: Consider (JD saved)")
-
-            # ── STEP 2: LLM Analysis ────────────────────────────────────────────
             add_log(f"  🤖 Analyzing + researching บริษัท...")
             company_hint = job.get("company_name_hint", "")
             if company_hint:
                 add_log(f"  🏷️ ใช้ชื่อบริษัทที่กรอกไว้: {company_hint}")
-
             analysis = analyze_with_llm(jd, known_company_name=company_hint)
             cn_log = analysis.get("company_name", "?")
             has_research = cn_log not in ("?", "Unknown", "Not specified", "")
             add_log(f"  {'🔍' if has_research else '⚠️'} {cn_log}")
 
-            # ── STEP 3: Handle LLM result ───────────────────────────────────────
             if analysis.get("error") == "no_company":
                 jt_nc = analysis.get("job_title", "Unknown")
-                add_log(f"  ⚠️ ไม่พบชื่อบริษัทใน JD ({jt_nc})")
+                add_log(f"  ⚠️ ไม่พบชื่อบริษัทใน JD ({jt_nc}) — ข้าม LLM fit analysis")
                 stats["err"] += 1
                 results.append({"url": url, "name": name, "status": "error", "error": "ไม่พบชื่อบริษัทใน JD"})
                 if JOB_LISTING_DB_ID:
-                    _uid, _uerr = upsert_job_listing(
-                        url, job_title=jt_nc,
-                        jd_raw=jd[:2000],
-                        status_key="need_company",
-                        error_note="ไม่พบชื่อบริษัทใน JD — กรุณากรอก Company แล้วเปลี่ยน status เป็น LLM Error เพื่อ retry"
-                    )
+                    # ตั้ง status = "need_company" — รอผู้ใช้กรอกชื่อบริษัทใน Notion ก่อน
+                    # แล้วเปลี่ยน status เป็น "llm_error" เองเพื่อ retry
+                    _uid, _uerr = upsert_job_listing(url, job_title=jt_nc,
+                                       jd_raw=jd[:2000] if 'jd' in locals() else "",
+                                       status_key="need_company",
+                                       error_note="ไม่พบชื่อบริษัทใน JD — กรุณากรอก Company แล้วเปลี่ยน status เป็น LLM Error เพื่อ retry")
                     if _uerr:
                         add_log(f"  ⚠️ Listing update failed: {_uerr}")
                     else:
-                        add_log(f"  📋 Listing: need_company")
-
+                        add_log(f"  📋 Listing: need_company (กรอก Company แล้วเปลี่ยนเป็น LLM Error เพื่อ retry)")
             elif "error" in analysis and analysis.get("job_title", "Unknown") == "Unknown" and analysis.get("company_name", "Unknown") == "Unknown":
                 add_log(f"  ❌ LLM error: {analysis['error']}")
                 stats["err"] += 1
                 results.append({"url": url, "name": name, "status": "error", "error": analysis["error"]})
                 if JOB_LISTING_DB_ID:
-                    _uid, _uerr = upsert_job_listing(
-                        url, status_key="llm_error",
-                        jd_raw=jd[:2000],
-                        error_note=f"LLM error: {analysis.get('error','')}"
-                    )
+                    # ตั้ง status = "llm_error" เพื่อออกจาก queue ถาวร
+                    _uid, _uerr = upsert_job_listing(url, status_key="llm_error",
+                                       jd_raw=jd[:2000] if 'jd' in locals() else "",
+                                       error_note=f"LLM error: {analysis.get('error','')}")
                     if _uerr:
                         add_log(f"  ⚠️ Listing update failed: {_uerr}")
                     else:
-                        add_log(f"  📋 Listing: llm_error (JD saved — retry ได้โดยไม่ fetch ซ้ำ)")
-
+                        add_log(f"  📋 Listing: llm_error (ออกจาก queue แล้ว)")
             else:
-                # LLM สำเร็จ
-                jt       = analysis.get("job_title", "?")
-                cn       = analysis.get("company_name", "?")
+                jt = analysis.get("job_title", "?")
+                cn = analysis.get("company_name", "?")
                 decision = analysis.get("apply_decision", "?")
                 add_log(f"  ✅ {jt} @ {cn} | {analysis.get('fit_level','?')} | {decision}")
                 stats["ok"] += 1
                 result_entry = {"url": url, "name": name, "status": "ok", "analysis": analysis}
 
-                # ── STEP 4: Push to Notion Job Pipeline ─────────────────────────
+                # บันทึก Consider + ข้อมูลดิบ
+                if JOB_LISTING_DB_ID:
+                    upsert_job_listing(url, job_title=jt, company_name=cn,
+                                       jd_raw=jd[:2000] if 'jd' in locals() else "",
+                                       status_key="consider")
+                    add_log(f"  📋 Listing: Consider")
+
+                # Push Notion อัตโนมัติเสมอ
                 add_log(f"  📤 Pushing to Notion...")
                 try:
                     j_data, c_data = analysis_to_notion_dicts(analysis, url)
                     if not j_data.get("job_title", "").strip():
                         raise ValueError("no job title")
                     cname = c_data.get("company_name", "").strip()
+                    # ถ้าชื่อบริษัทไม่ชัดเจน → ลอง extract จาก URL ก่อน
                     if not cname or cname.lower() in ("not specified", "unknown", ""):
                         url_company = _company_from_url(url)
                         if url_company:
@@ -1881,7 +1956,8 @@ with tab3:
                             c_data["company_name"] = cname
                             add_log(f"  🔎 Company from URL: {cname}")
                         else:
-                            raise ValueError("ไม่ทราบชื่อบริษัท — ไม่ push Notion (แก้ใน Listing แล้วลอง retry)")
+                            # ยังไม่ได้ชื่อบริษัทเลย → ไม่ push, ตั้ง fetch_error
+                            raise ValueError(f"ไม่ทราบชื่อบริษัท — ไม่ push Notion (แก้ใน Listing แล้วลอง retry)")
                     company_id, found = search_company(cname)
                     if not found or not company_id:
                         company_id, cerr = create_company(c_data, opt)
@@ -1893,7 +1969,8 @@ with tab3:
                     add_log(f"  ✅ Notion OK")
                     stats["notion_ok"] += 1
 
-                    # อัปเดต Listing → Added (ออกจาก queue ถาวร)
+                    # อัปเดต Listing → "added" เสมอ ไม่ว่า AI จะตัดสิน APPLY/WATCHLIST/PASS
+                    # (สถานะใน Job Pipeline DB ต่างหากที่บอกว่า To Apply / On Hold / Pass)
                     if JOB_LISTING_DB_ID:
                         upsert_job_listing(url, status_key="added")
                         add_log(f"  📋 Listing: Added ✅")
@@ -1901,21 +1978,19 @@ with tab3:
                 except Exception as e:
                     add_log(f"  ❌ Notion error: {e}")
                     stats["notion_err"] += 1
-                    if JOB_LISTING_DB_ID:
-                        if "ไม่ทราบชื่อบริษัท" in str(e):
-                            upsert_job_listing(url, status_key="need_company",
-                                               error_note=f"Company name unknown: {str(e)[:200]}")
-                            add_log(f"  📋 Listing: need_company (ไม่ทราบชื่อบริษัท)")
-                        else:
-                            # Notion error อื่น → คง consider ไว้ retry ได้
-                            add_log(f"  📋 Listing: คง Consider ไว้ (Notion error — retry ได้)")
+                    # ถ้าเป็น error เรื่องชื่อบริษัท → ตั้ง fetch_error ไม่ใช่ค้าง consider
+                    if JOB_LISTING_DB_ID and "ไม่ทราบชื่อบริษัท" in str(e):
+                        upsert_job_listing(url, status_key="fetch_error",
+                                           error_note=f"Company name unknown: {str(e)[:200]}")
+                        add_log(f"  📋 Listing: fetch_error (ไม่ทราบชื่อบริษัท)")
+                    else:
+                        add_log(f"  📋 Listing: คง Consider ไว้ (Notion error — retry ได้)")
 
                 results.append(result_entry)
 
             if i < len(jobs_to_run) - 1:
                 time.sleep(delay)
 
-        # ── Rerank ──────────────────────────────────────────────────────────────
         if stats["notion_ok"] > 0:
             add_log("\n📊 Reranking all jobs...")
             try:
@@ -1924,12 +1999,13 @@ with tab3:
             except Exception as e:
                 add_log(f"❌ Rerank error: {e}")
 
+        # ── Clear queue ถ้ามาจาก Listing DB ─────────────────
         if source == "listing_db":
             st.session_state["listing_queue"] = []
 
         progress.progress(1.0, text="เสร็จแล้ว! ✨")
 
-        # ── Summary ──────────────────────────────────────────────────────────────
+        # ── Summary ───────────────────────────────────────────
         st.markdown("---")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("วิเคราะห์ได้",  stats["ok"])
@@ -1953,7 +2029,7 @@ with tab3:
             if top:
                 st.caption(f"Top skill gaps: {', '.join(f'{g}({n})' for g,n in top)}")
 
-        # ── Failed jobs retry UI ─────────────────────────────────────────────────
+        # ── Failed jobs — retry ───────────────────────────────
         failed_jobs = [r for r in results if r.get("status") == "error"]
         if failed_jobs:
             st.markdown("---")
@@ -1968,7 +2044,7 @@ with tab3:
                             with st.spinner("วิเคราะห์..."):
                                 a2 = analyze_with_llm(retry_jd.strip())
                             if "error" not in a2 or a2.get("job_title") != "Unknown":
-                                jt2  = a2.get("job_title", "?")
+                                jt2 = a2.get("job_title", "?")
                                 cn2d = a2.get("company_name", "?")
                                 st.success(f"✅ {jt2} @ {cn2d}")
                                 if JOB_LISTING_DB_ID:
@@ -1994,7 +2070,14 @@ with tab3:
                                     if ok2:
                                         st.success("📤 Push Notion สำเร็จค่ะ!")
                                         if JOB_LISTING_DB_ID:
+                                            # ทุก job ที่ push สำเร็จ → "added" เสมอ
                                             upsert_job_listing(fr["url"], status_key="added")
+                                        with st.spinner("กำลัง rerank jobs..."):
+                                            try:
+                                                rerank_all_jobs(opt, lambda *_: None)
+                                                st.success("✅ Rerank เสร็จแล้ว")
+                                            except Exception as rerank_ex:
+                                                st.warning(f"⚠️ Rerank error: {rerank_ex}")
                                     else:
                                         st.error(f"Notion error: {jerr2}")
                                 except Exception as ex:
