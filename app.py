@@ -373,8 +373,9 @@ def get_listing_status_map():
         "consider":    fuzzy_match("Consider",    options, cutoff=0.5) or "Consider",
         "added":       fuzzy_match("Added",        options, cutoff=0.5) or "Added",
         # error states — ออกจาก queue แต่ยังไม่เสร็จ
-        "fetch_error": fuzzy_match("Fetch Error",  options, cutoff=0.5) or "Fetch Error",
-        "llm_error":   fuzzy_match("LLM Error",    options, cutoff=0.5) or "LLM Error",
+        "fetch_error":  fuzzy_match("Fetch Error",   options, cutoff=0.5) or "Fetch Error",
+        "llm_error":    fuzzy_match("LLM Error",     options, cutoff=0.5) or "LLM Error",
+        "need_company": fuzzy_match("Need Company",  options, cutoff=0.5) or "Need Company",
         # not_apply ถูกลบออก — ทุก job ที่ push Notion สำเร็จใช้ "added" เสมอ
     }
 
@@ -1369,7 +1370,7 @@ def research_company(company_name, website=""):
     return "\n\n".join(sections)[:4000]
 
 
-def analyze_with_llm(jd_text, retries=2):
+def analyze_with_llm(jd_text, retries=2, known_company_name=""):
     # ── Call 1: Extract job facts จาก JD (~2000 tokens) ────
     extract_prompt = JD_EXTRACT_PROMPT.format(jd_text=jd_text[:6000])
     try:
@@ -1384,6 +1385,11 @@ def analyze_with_llm(jd_text, retries=2):
             job_facts["raw_jd"] = jd_text[:2000]
     except RuntimeError as e:
         return {"error": str(e), "job_title": "Unknown", "company_name": "Unknown"}
+
+    # ── ถ้าผู้ใช้กรอกชื่อบริษัทมาเอง (เช่น แปะ JD จาก Facebook + กรอก Company ใน Notion)
+    #    ให้เชื่อชื่อนั้นเสมอ — แม่นยำกว่า LLM เดาจาก JD ที่อาจไม่มีชื่อบริษัทระบุชัด
+    if known_company_name and known_company_name.strip():
+        job_facts["company_name"] = known_company_name.strip()
 
     # ── Call 1.5: Research บริษัทจาก web ────────────────────
     # ลอง regex fallback ก่อน research เพื่อให้ได้ชื่อบริษัทที่ดีขึ้น
@@ -1410,7 +1416,14 @@ def analyze_with_llm(jd_text, retries=2):
     if company_name.lower() not in UNKNOWN_NAMES:
         company_research = research_company(company_name, website)
     else:
-        company_research = "ไม่ทราบชื่อบริษัท — ข้าม research"
+        # ── ไม่รู้ชื่อบริษัทแม้ลอง regex แล้ว และไม่มี known_company_name ──
+        # หยุดตรงนี้ ไม่เรียก Call 2 (fit analysis) เพื่อไม่เปลือง token
+        # ให้ผู้ใช้กรอกชื่อบริษัทใน Notion (field Company) ก่อน แล้วเปลี่ยน status เป็น llm_error เพื่อ retry
+        return {
+            "error": "no_company",
+            "job_title": job_facts.get("job_title", "Unknown"),
+            "company_name": "Unknown",
+        }
 
     # ── Call 2: วิเคราะห์ fit (~3500 tokens) ───────────────
     fit_prompt = FIT_ANALYSIS_PROMPT.format(
@@ -1628,6 +1641,7 @@ with tab3:
             url_field    = pmap.get("url", "URL")
             name_field   = pmap.get("name", "Name")
             jd_field     = pmap.get("jd", "JD")
+            company_field = pmap.get("company", "Company")
 
             # ── Paginate ทุก row (ไม่มี limit 100) ─────────────
             rows = []
@@ -1643,11 +1657,12 @@ with tab3:
                     break
                 payload["start_cursor"] = data["next_cursor"]
 
-            # สถานะที่ "เสร็จแล้ว" หรือ URL ใช้ไม่ได้ถาวร → ข้ามถาวร
-            DONE_STATUSES = {"added", "fetch_error"}
+            # สถานะที่ "เสร็จแล้ว" หรือ ต้องรอแก้ไขด้วยมือก่อน → ข้ามถาวร (auto-queue ไม่หยิบ)
+            # need_company: รอผู้ใช้กรอกชื่อบริษัทใน Notion แล้วเปลี่ยนเป็น llm_error เพื่อ retry เอง
+            DONE_STATUSES = {"added", "fetch_error", "need_company"}
             # สถานะที่ "ว่าง" → ถือว่า pending ใหม่
             EMPTY_STATUS_VALUES = {"", "no status", "no apply status", "none", "-"}
-            # llm_error → retry ได้ (JD ดึงมาได้แล้ว แต่ LLM พัง)
+            # llm_error / consider → retry ได้ (JD ดึงมาได้แล้ว แต่ LLM พัง หรือยัง push ไม่สำเร็จ)
 
             pending = []
             for row in rows:
@@ -1685,9 +1700,15 @@ with tab3:
                 jd_arr  = jp.get("rich_text", [])
                 jd_text = jd_arr[0].get("plain_text", "") if jd_arr else ""
 
+                # ── Company (ถ้าผู้ใช้กรอกไว้เอง — ใช้ override การเดาของ LLM) ──
+                cp = props.get(company_field, {})
+                company_arr = cp.get("rich_text", []) or cp.get("title", [])
+                company_name_hint = company_arr[0].get("plain_text", "").strip() if company_arr else ""
+
                 pending.append({
                     "notion_id": row["id"], "url": url,
                     "name": name or url[:60], "jd_text": jd_text,
+                    "company_name_hint": company_name_hint,
                 })
             return pending, None
         except Exception as e:
@@ -1825,12 +1846,31 @@ with tab3:
                 add_log(f"  📄 {jd[:80].replace(chr(10),' ')}...")
 
             add_log(f"  🤖 Analyzing + researching บริษัท...")
-            analysis = analyze_with_llm(jd)
+            company_hint = job.get("company_name_hint", "")
+            if company_hint:
+                add_log(f"  🏷️ ใช้ชื่อบริษัทที่กรอกไว้: {company_hint}")
+            analysis = analyze_with_llm(jd, known_company_name=company_hint)
             cn_log = analysis.get("company_name", "?")
             has_research = cn_log not in ("?", "Unknown", "Not specified", "")
             add_log(f"  {'🔍' if has_research else '⚠️'} {cn_log}")
 
-            if "error" in analysis and analysis.get("job_title", "Unknown") == "Unknown" and analysis.get("company_name", "Unknown") == "Unknown":
+            if analysis.get("error") == "no_company":
+                jt_nc = analysis.get("job_title", "Unknown")
+                add_log(f"  ⚠️ ไม่พบชื่อบริษัทใน JD ({jt_nc}) — ข้าม LLM fit analysis")
+                stats["err"] += 1
+                results.append({"url": url, "name": name, "status": "error", "error": "ไม่พบชื่อบริษัทใน JD"})
+                if JOB_LISTING_DB_ID:
+                    # ตั้ง status = "need_company" — รอผู้ใช้กรอกชื่อบริษัทใน Notion ก่อน
+                    # แล้วเปลี่ยน status เป็น "llm_error" เองเพื่อ retry
+                    _uid, _uerr = upsert_job_listing(url, job_title=jt_nc,
+                                       jd_raw=jd[:2000] if 'jd' in locals() else "",
+                                       status_key="need_company",
+                                       error_note="ไม่พบชื่อบริษัทใน JD — กรุณากรอก Company แล้วเปลี่ยน status เป็น LLM Error เพื่อ retry")
+                    if _uerr:
+                        add_log(f"  ⚠️ Listing update failed: {_uerr}")
+                    else:
+                        add_log(f"  📋 Listing: need_company (กรอก Company แล้วเปลี่ยนเป็น LLM Error เพื่อ retry)")
+            elif "error" in analysis and analysis.get("job_title", "Unknown") == "Unknown" and analysis.get("company_name", "Unknown") == "Unknown":
                 add_log(f"  ❌ LLM error: {analysis['error']}")
                 stats["err"] += 1
                 results.append({"url": url, "name": name, "status": "error", "error": analysis["error"]})
