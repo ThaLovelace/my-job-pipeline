@@ -405,7 +405,7 @@ def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_
     # ── สร้าง properties payload ด้วยชื่อ property จริง ─────
     props = {}
 
-    # Status
+    # Status — always written
     status_prop = pmap.get("status")
     status_type = pmap.get("status_type", "select")
     if status_prop:
@@ -414,16 +414,16 @@ def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_
         else:
             props[status_prop] = {"select": {"name": status_name}}
 
-    # Name / title
+    # Name / title — only write if caller provided a value (avoid blanking existing title)
     name_prop = pmap.get("name")
     if name_prop and job_title:
         props[name_prop] = {"title": [{"text": {"content": job_title[:200]}}]}
 
-    # URL
+    # URL — only write if provided
     if url_prop and url:
         props[url_prop] = {"url": url}
 
-    # Company
+    # Company — only write if provided
     company_prop = pmap.get("company")
     if company_prop and company_name:
         props[company_prop] = {"rich_text": [{"text": {"content": company_name[:200]}}]}
@@ -1346,16 +1346,38 @@ def analyze_with_llm(jd_text, retries=2):
         job_facts = json.loads(raw1)
     except json.JSONDecodeError:
         # ถ้า parse ไม่ได้ ลอง repair ก่อน แล้วค่อย fallback
-        job_facts = _parse_llm_json(raw1) if 'raw1' in dir() else {}
+        job_facts = _parse_llm_json(raw1) if 'raw1' in locals() else {}
         if not job_facts.get("company_name"):
             job_facts["raw_jd"] = jd_text[:2000]
     except RuntimeError as e:
         return {"error": str(e), "job_title": "Unknown", "company_name": "Unknown"}
 
     # ── Call 1.5: Research บริษัทจาก web ────────────────────
+    # ลอง regex fallback ก่อน research เพื่อให้ได้ชื่อบริษัทที่ดีขึ้น
     company_name = job_facts.get("company_name", "")
     website      = job_facts.get("website", "")
-    company_research = research_company(company_name, website)
+    UNKNOWN_NAMES = {"", "not specified", "unknown", "none", "n/a"}
+    if company_name.lower() in UNKNOWN_NAMES:
+        # ลอง regex ใน JD ก่อน research (เพื่อไม่เสีย ScraperAPI credits)
+        for pat in [
+            r"บริษัท\s+([^\s][^\n]+?)(?:\s+จำกัด|\s+\(มหาชน\)|$)",
+            r"(?:company|employer|posted by|hiring company)\s*[:\-]\s*(.+)",
+            r"(?:join|at|work at|careers at)\s+([A-Z][A-Za-z0-9\s&\.]{2,40}?)(?:\n|,|\.|$)",
+            r"©\s*(?:\d{4}\s+)?([A-Za-z][A-Za-z0-9\s&\.]{2,40}?)(?:\s|,|\.|All rights)",
+        ]:
+            m = re.search(pat, jd_text[:4000], re.IGNORECASE | re.MULTILINE)
+            if m:
+                candidate = m.group(1).strip()[:80]
+                SKIP_WORDS = {"apply", "job", "position", "role", "work", "us", "the", "our"}
+                if len(candidate) > 2 and candidate.lower() not in SKIP_WORDS:
+                    company_name = candidate
+                    job_facts["company_name"] = company_name
+                    break
+    # วิจัยบริษัทเฉพาะเมื่อมีชื่อชัดเจน — ไม่เปลือง ScraperAPI credits กับ "Not specified"
+    if company_name.lower() not in UNKNOWN_NAMES:
+        company_research = research_company(company_name, website)
+    else:
+        company_research = "ไม่ทราบชื่อบริษัท — ข้าม research"
 
     # ── Call 2: วิเคราะห์ fit (~3500 tokens) ───────────────
     fit_prompt = FIT_ANALYSIS_PROMPT.format(
@@ -1524,6 +1546,7 @@ with tab3:
             if st.button("รีเฟรช field map", key="btn_bust_pmap"):
                 get_listing_property_map.clear()
                 get_listing_status_map.clear()
+                load_options.clear()  # clear select options ด้วย (Company Size, Role Tier ฯลฯ)
             pmap_debug = get_listing_property_map()
             smap_debug = get_listing_status_map()
             st.json({"property_map": pmap_debug, "status_map": smap_debug})
@@ -1545,13 +1568,25 @@ with tab3:
             name_field   = pmap.get("name", "Name")
             jd_field     = pmap.get("jd", "JD")
 
-            res = requests.post(
-                f"https://api.notion.com/v1/databases/{JOB_LISTING_DB_ID}/query",
-                headers=HEADERS, json={"page_size": 100}
-            )
-            rows = res.json().get("results", [])
-            # ค่า status ที่ถือว่า "ยังไม่มีสถานะ" (pending) — ข้ามทุก row ที่มีค่าอื่น
+            # ── Paginate ทุก row (ไม่มี limit 100) ─────────────
+            rows = []
+            payload = {"page_size": 100}
+            while True:
+                res = requests.post(
+                    f"https://api.notion.com/v1/databases/{JOB_LISTING_DB_ID}/query",
+                    headers=HEADERS, json=payload
+                )
+                data = res.json()
+                rows.extend(data.get("results", []))
+                if not data.get("has_more"):
+                    break
+                payload["start_cursor"] = data["next_cursor"]
+
+            # สถานะที่ "เสร็จแล้ว" หรือ URL ใช้ไม่ได้ถาวร → ข้ามถาวร
+            DONE_STATUSES = {"consider", "added", "not_apply", "fetch_error"}
+            # สถานะที่ "ว่าง" → ถือว่า pending ใหม่
             EMPTY_STATUS_VALUES = {"", "no status", "no apply status", "none", "-"}
+            # llm_error → retry ได้ (JD ดึงมาได้แล้ว แต่ LLM พัง)
 
             pending = []
             for row in rows:
@@ -1561,10 +1596,17 @@ with tab3:
                 sp = props.get(status_field, {})
                 sel = sp.get("select") or sp.get("status") or {}
                 status_val = (sel.get("name") or "").strip()
-                # ข้ามทุก row ที่มีค่า status ใดๆ ที่ไม่ใช่ "ว่าง" —
-                # รวม fetch_error, llm_error, consider, added, not_apply ฯลฯ
-                if status_val.lower() not in EMPTY_STATUS_VALUES:
-                    continue  # มี status แล้ว → ข้าม
+                status_lower = status_val.lower()
+
+                # ข้าม row ที่เสร็จแล้ว หรือ URL ใช้ไม่ได้ถาวร (consider/added/not_apply/fetch_error)
+                if status_lower in DONE_STATUSES:
+                    continue
+                if status_lower not in EMPTY_STATUS_VALUES:
+                    # retry เฉพาะ llm_error — JD ดึงมาได้แล้วแต่ LLM พัง
+                    # fetch_error ข้ามถาวรแล้ว (อยู่ใน DONE_STATUSES)
+                    is_retryable = status_lower == "llm_error"
+                    if not is_retryable:
+                        continue  # status ที่ไม่รู้จัก → ข้าม
 
                 # ── URL ──────────────────────────────────────────
                 up = props.get(url_field, {})
@@ -1734,7 +1776,7 @@ with tab3:
                 if JOB_LISTING_DB_ID:
                     # ตั้ง status = "llm_error" เพื่อออกจาก queue ถาวร
                     _uid, _uerr = upsert_job_listing(url, status_key="llm_error",
-                                       jd_raw=jd[:2000] if 'jd' in dir() else "",
+                                       jd_raw=jd[:2000] if 'jd' in locals() else "",
                                        error_note=f"LLM error: {analysis.get('error','')}")
                     if _uerr:
                         add_log(f"  ⚠️ Listing update failed: {_uerr}")
@@ -1751,7 +1793,7 @@ with tab3:
                 # บันทึก Consider + ข้อมูลดิบ
                 if JOB_LISTING_DB_ID:
                     upsert_job_listing(url, job_title=jt, company_name=cn,
-                                       jd_raw=jd[:2000] if 'jd' in dir() else "",
+                                       jd_raw=jd[:2000] if 'jd' in locals() else "",
                                        status_key="consider")
                     add_log(f"  📋 Listing: Consider")
 
