@@ -64,7 +64,7 @@ GROQ_API_KEY        = st.secrets.get("GROQ_API_KEY", "")
 
 RESUME_VERSIONS_DB_ID = st.secrets.get("RESUME_VERSIONS_DB_ID", "a3d45e99-8f7f-4304-a66d-760bb45e556e")
 PROJECT_DETAILS_DB_ID = st.secrets.get("PROJECT_DETAILS_DB_ID", "a07cbb74-b720-43b8-98fc-726410d8fe00")
-CLAUDE_API_KEY         = st.secrets.get("CLAUDE_API_KEY", "")
+GEMINI_API_KEY         = st.secrets.get("GEMINI_API_KEY", "")
 
 HEADERS = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
@@ -2088,6 +2088,8 @@ with tab3:
     with st.expander("⚙️ Settings", expanded=False):
         delay = st.slider("หน่วงเวลาระหว่าง request (วินาที)", 5, 30, 12,
                           help="แนะนำ 12+ วินาที เพื่อหลีกเลี่ยง Groq rate limit")
+        batch_size = st.slider("จำนวนงานต่อ batch (0 = ทั้งหมด)", 0, 50, 0,
+                               help="แนะนำ 15-20 งานต่อ batch เพื่อกัน session timeout | 0 = รันทั้งหมดที่มี")
 
     # ── Debug: แสดง property map จริงจาก Notion ─────────────
     if JOB_LISTING_DB_ID:
@@ -2305,6 +2307,12 @@ with tab3:
     # SECTION C — Pipeline ประมวลผล (ทำงานเมื่อกดปุ่มใดก็ตาม)
     # ══════════════════════════════════════════════════════════
     if jobs_to_run:
+        # ── ตัด batch ตาม batch_size ────────────────────────
+        total_in_queue = len(jobs_to_run)
+        if batch_size > 0 and total_in_queue > batch_size:
+            jobs_to_run = jobs_to_run[:batch_size]
+            st.info(f"📦 Queue มี {total_in_queue} งาน — รัน batch นี้ {batch_size} งานก่อน "
+                    f"(เหลือ {total_in_queue - batch_size} งาน กด 🚀 อีกครั้งเพื่อทำรอบต่อไป)")
         st.markdown("---")
         st.subheader("⚙️ กำลังประมวลผล...")
 
@@ -2474,7 +2482,7 @@ with tab3:
                         add_log(f"  🎯 APPLY → เช็ค budget + เริ่ม resume matching...")
                         current_spend = get_monthly_spend_so_far()
                         if notify_budget_exceeded(current_spend, jt):
-                            add_log(f"  🚨 Budget cap ถึงแล้ว ({current_spend:.2f}/{BUDGET_CAP_THB} ฿) — ข้าม Claude")
+                            add_log(f"  🚨 Budget cap ถึงแล้ว ({current_spend:.2f}/{BUDGET_CAP_THB} ฿) — ข้าม Gemini")
                         else:
                             try:
                                 rm_result = resume_matching_pipeline(
@@ -2620,7 +2628,7 @@ with tab3:
 
 
 # ══════════════════════════════════════════════════════════════
-# RESUME MATCHING PIPELINE (Claude Sonnet 4.6)
+# RESUME MATCHING PIPELINE (Gemini API)
 # ══════════════════════════════════════════════════════════════
 
 SPEND_TRACKER_PAGE_TITLE = "💰 API Spend Tracker"
@@ -2630,17 +2638,19 @@ SPEND_TRACKER_DB_ID      = st.secrets.get("SPEND_TRACKER_DB_ID", "")  # optional
 USD_TO_THB = 35.0
 BUDGET_CAP_THB = 50.0
 
-# Claude Sonnet 4.6 pricing (June 2026)
-SONNET_INPUT_PER_MILLION  = 3.0   # USD
-SONNET_OUTPUT_PER_MILLION = 15.0  # USD
-SONNET_CACHE_READ_PER_MILLION = 0.3  # USD (90% discount)
+# Gemini 2.5 Flash pricing (June 2026) — ใช้ free tier ของ Google AI Studio
+# Free tier: 10 RPM / 250 RPD ต่อ project — เพียงพอสำหรับ batch 15-20 งาน/ครั้ง
+# ถ้าวันหนึ่งเปลี่ยนไปใช้ paid tier ให้แก้ค่าด้านล่างเป็นเรทจริง (เช่น Flash $0.30/$2.50 ต่อล้าน token)
+GEMINI_INPUT_PER_MILLION  = 0.0   # USD — free tier
+GEMINI_OUTPUT_PER_MILLION = 0.0   # USD — free tier
+GEMINI_CACHE_READ_PER_MILLION = 0.0  # USD — free tier
 
 
 def _tokens_to_thb(input_tokens: int, output_tokens: int, cache_read_tokens: int = 0) -> float:
     cost_usd = (
-        (input_tokens      / 1_000_000) * SONNET_INPUT_PER_MILLION
-        + (output_tokens   / 1_000_000) * SONNET_OUTPUT_PER_MILLION
-        + (cache_read_tokens / 1_000_000) * SONNET_CACHE_READ_PER_MILLION
+        (input_tokens      / 1_000_000) * GEMINI_INPUT_PER_MILLION
+        + (output_tokens   / 1_000_000) * GEMINI_OUTPUT_PER_MILLION
+        + (cache_read_tokens / 1_000_000) * GEMINI_CACHE_READ_PER_MILLION
     )
     return cost_usd * USD_TO_THB
 
@@ -2731,14 +2741,14 @@ def log_token_usage(job_title: str, input_tok: int, output_tok: int, cache_tok: 
 def notify_budget_exceeded(current_spend: float, job_title: str = ""):
     """
     1.8 — เมื่อชน budget cap 50 ฿:
-    - หยุด Claude API ทันที (caller ต้องเช็ค return value)
+    - หยุด Gemini API ทันที (caller ต้องเช็ค return value)
     - เขียน Notion แจ้งเตือน (ถ้ามี SPEND_TRACKER_DB_ID)
     - คืน True = ชนเพดาน, False = ยังโอเค
     """
     if current_spend < BUDGET_CAP_THB:
         return False
 
-    msg = f"🚨 Budget cap {BUDGET_CAP_THB} ฿ ถึงแล้ว (ใช้ไป {current_spend:.2f} ฿) — หยุด Claude API อัตโนมัติ"
+    msg = f"🚨 Budget cap {BUDGET_CAP_THB} ฿ ถึงแล้ว (ใช้ไป {current_spend:.2f} ฿) — หยุด Gemini API อัตโนมัติ"
     if job_title:
         msg += f" | งานค้าง: {job_title} → ตั้ง On Hold"
     st.error(msg)
@@ -2811,44 +2821,51 @@ RESUME_MATCHING_SYSTEM_PROMPT = """
 """
 
 
-def _call_claude_api(system_prompt: str, user_message: str) -> dict:
+def _call_gemini_api(system_prompt: str, user_message: str) -> dict:
     """
-    Low-level call ไปยัง Claude Sonnet 4.6 API
+    Low-level call ไปยัง Gemini API (Gemini 2.5 Flash — free tier)
     คืน (response_dict, usage_dict) หรือ raise RuntimeError
     """
-    if not CLAUDE_API_KEY:
-        raise RuntimeError("ไม่มี CLAUDE_API_KEY ใน secrets — กรุณาเพิ่มใน Streamlit secrets")
+    if not GEMINI_API_KEY:
+        raise RuntimeError("ไม่มี GEMINI_API_KEY ใน secrets — กรุณาเพิ่มใน Streamlit secrets")
 
+    model = "gemini-2.5-flash"
     response = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": CLAUDE_API_KEY,
-            "anthropic-version": "2023-06-01",
-            "anthropic-beta": "prompt-caching-2024-07-31",
-            "Content-Type": "application/json",
-        },
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+        params={"key": GEMINI_API_KEY},
+        headers={"Content-Type": "application/json"},
         json={
-            "model": "claude-sonnet-4-6",
-            "max_tokens": 4096,
-            "system": [
-                {
-                    "type": "text",
-                    "text": system_prompt,
-                    "cache_control": {"type": "ephemeral"}  # prompt caching จริง
-                }
+            "system_instruction": {
+                "parts": [{"text": system_prompt}]
+            },
+            "contents": [
+                {"role": "user", "parts": [{"text": user_message}]}
             ],
-            "messages": [{"role": "user", "content": user_message}],
+            "generationConfig": {
+                "maxOutputTokens": 4096,
+                "responseMimeType": "application/json",
+            },
         },
         timeout=120,
     )
 
     if response.status_code != 200:
-        raise RuntimeError(f"Claude API HTTP {response.status_code}: {response.text[:300]}")
+        raise RuntimeError(f"Gemini API HTTP {response.status_code}: {response.text[:300]}")
 
     data = response.json()
-    usage = data.get("usage", {})
-    content_blocks = data.get("content", [])
-    text = "".join(b.get("text", "") for b in content_blocks if b.get("type") == "text")
+    usage_meta = data.get("usageMetadata", {})
+    usage = {
+        "input_tokens": usage_meta.get("promptTokenCount", 0),
+        "output_tokens": usage_meta.get("candidatesTokenCount", 0),
+        "cache_read_input_tokens": usage_meta.get("cachedContentTokenCount", 0),
+    }
+
+    candidates = data.get("candidates", [])
+    if not candidates:
+        raise RuntimeError(f"Gemini ไม่คืน candidates — raw: {json.dumps(data)[:300]}")
+
+    parts = candidates[0].get("content", {}).get("parts", [])
+    text = "".join(p.get("text", "") for p in parts)
 
     # parse JSON
     text_clean = text.strip()
@@ -2858,7 +2875,7 @@ def _call_claude_api(system_prompt: str, user_message: str) -> dict:
     try:
         parsed = json.loads(text_clean)
     except json.JSONDecodeError as e:
-        raise RuntimeError(f"Claude ตอบ JSON ไม่ถูกต้อง: {e} | raw: {text[:300]}")
+        raise RuntimeError(f"Gemini ตอบ JSON ไม่ถูกต้อง: {e} | raw: {text[:300]}")
 
     return parsed, usage
 
@@ -3205,7 +3222,7 @@ def resume_matching_pipeline(
     project_details_cache: list | None = None,   # ถ้า None → ดึงใหม่เอง
 ) -> dict:
     """
-    1.7 — Resume Matching + Application Draft ด้วย Claude Sonnet 4.6
+    1.7 — Resume Matching + Application Draft ด้วย Gemini API
     เรียกหลังจาก Job Pipeline ingestion สำเร็จแล้วเท่านั้น
 
     job_data ควรมี: key_tech_stack, fit_level, ai_depth_score, gaps, notes,
@@ -3269,12 +3286,12 @@ def resume_matching_pipeline(
 ทำ STEP 2A-2B และ STEP 3 ทั้งหมด ตอบกลับเป็น JSON ตาม output format ใน system prompt
 """
 
-    # ── เรียก Claude API ──────────────────────────────────────
-    log(f"  🤖 เรียก Claude Sonnet 4.6...")
+    # ── เรียก Gemini API ──────────────────────────────────────
+    log(f"  🤖 เรียก Gemini 2.5 Flash...")
     try:
-        draft, usage = _call_claude_api(RESUME_MATCHING_SYSTEM_PROMPT, user_msg)
+        draft, usage = _call_gemini_api(RESUME_MATCHING_SYSTEM_PROMPT, user_msg)
     except RuntimeError as e:
-        log(f"  ❌ Claude API error: {e}")
+        log(f"  ❌ Gemini API error: {e}")
         return {"success": False, "path": None, "error": str(e)}
 
     # บันทึก token usage
@@ -3394,7 +3411,7 @@ def resume_matching_pipeline(
         pct   = min(spend / BUDGET_CAP_THB, 1.0)
         st.progress(pct, text=f"ใช้ไป {spend:.2f} / {BUDGET_CAP_THB:.0f} ฿ ({pct*100:.0f}%)")
         if spend >= BUDGET_CAP_THB:
-            st.error("🚨 Budget cap ถึงแล้ว — Claude API หยุดทำงานอัตโนมัติ")
+            st.error("🚨 Budget cap ถึงแล้ว — Gemini API หยุดทำงานอัตโนมัติ")
         elif spend >= BUDGET_CAP_THB * 0.8:
             st.warning("⚠️ เกือบถึง budget cap แล้ว")
 
