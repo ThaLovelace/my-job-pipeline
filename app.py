@@ -2080,6 +2080,133 @@ def _parse_llm_json(raw):
         }
 
 
+# ── Cache-loader functions (must be defined before tab3 calls them) ──────────
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_resume_versions_cache() -> list:
+    """
+    STEP 0 — ดึง Resume Versions ทั้งหมดจาก Notion สำหรับใช้ใน batch
+    cache 5 นาที — ทำครั้งเดียวต่อ batch แทนที่จะดึงแยกต่อทุกงาน
+    คืน list of dicts: version_id, tone_label, use_when, use_with,
+      summary_paragraph, headline, skills_emphasis, projects_order, canva_link
+    """
+    try:
+        res = requests.post(
+            f"https://api.notion.com/v1/databases/{RESUME_VERSIONS_DB_ID}/query",
+            headers=HEADERS,
+            json={"page_size": 50}
+        )
+        results = res.json().get("results", [])
+        cache = []
+        for page in results:
+            p = page.get("properties", {})
+            def txt(key):
+                arr = (p.get(key) or {}).get("rich_text", [])
+                return arr[0].get("plain_text", "").strip() if arr else ""
+            def sel(key):
+                return ((p.get(key) or {}).get("select") or {}).get("name", "").strip()
+            def ttl(key):
+                arr = (p.get(key) or {}).get("title", [])
+                return arr[0].get("plain_text", "").strip() if arr else ""
+            def url_val(key):
+                return (p.get(key) or {}).get("url", "") or ""
+            vid = ttl("version_id") or txt("version_id")
+            if not vid:
+                continue
+            cache.append({
+                "version_id":        vid,
+                "tone_label":        sel("tone_label") or txt("tone_label"),
+                "use_when":          txt("use_when"),
+                "use_with":          txt("use_with"),
+                "summary_paragraph": txt("summary_paragraph"),
+                "headline":          txt("headline"),
+                "skills_emphasis":   txt("skills_emphasis"),
+                "projects_order":    txt("projects_order"),
+                "canva_link":        url_val("canva_link"),
+            })
+        return cache
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_project_details_cache() -> list:
+    """
+    STEP 0 — ดึง Project Details ทั้งหมดจาก Notion สำหรับใช้ใน batch
+    cache 5 นาที — ทำครั้งเดียวต่อ batch
+    คืน list of dicts: Project Name, Project Type, Tech Stack, etc.
+    """
+    try:
+        res = requests.post(
+            f"https://api.notion.com/v1/databases/{PROJECT_DETAILS_DB_ID}/query",
+            headers=HEADERS,
+            json={"page_size": 20}
+        )
+        results = res.json().get("results", [])
+        cache = []
+        for page in results:
+            p = page.get("properties", {})
+            def txt(key):
+                arr = (p.get(key) or {}).get("rich_text", [])
+                return arr[0].get("plain_text", "").strip() if arr else ""
+            def ttl(key):
+                arr = (p.get(key) or {}).get("title", [])
+                return arr[0].get("plain_text", "").strip() if arr else ""
+            name = ttl("Project Name") or txt("Project Name")
+            if not name:
+                continue
+            cache.append({
+                "Project Name":        name,
+                "Project Type":        txt("Project Type"),
+                "Tech Stack":          txt("Tech Stack"),
+                "Problem/Why Built":   txt("Problem/Why Built"),
+                "Key Actions":         txt("Key Actions"),
+                "Key Metrics":         txt("Key Metrics"),
+                "Relevance Tags":      txt("Relevance Tags"),
+                "STAR Story":          txt("STAR Story"),
+                "Can Answer Questions":txt("Can Answer Questions"),
+                "Portfolio Link":      txt("Portfolio Link"),
+            })
+        return cache
+    except Exception:
+        return []
+
+
+def _format_resume_versions_cache(cache: list) -> str:
+    """แปลง resume_versions_cache (list of dicts) เป็น string สำหรับ prompt"""
+    if not cache:
+        return "(ไม่พบ Resume Versions ใน cache)"
+    lines = []
+    for v in cache:
+        block = f"VERSION {v['version_id']}"
+        if v.get("tone_label"): block += f" — {v['tone_label']}"
+        if v.get("use_with"):   block += f"\n  ใช้กับ: {v['use_with']}"
+        if v.get("use_when"):   block += f"\n  ใช้เมื่อ: {v['use_when']}"
+        if v.get("skills_emphasis"): block += f"\n  เน้น: {v['skills_emphasis']}"
+        lines.append(block)
+    return "\n\n".join(lines)
+
+
+def _format_project_details_cache(cache: list) -> str:
+    """แปลง project_details_cache (list of dicts) เป็น string สำหรับ prompt"""
+    if not cache:
+        return "(ไม่พบ Project Details ใน cache)"
+    blocks = []
+    for proj in cache:
+        block = f"PROJECT: {proj['Project Name']}"
+        if proj.get("Project Type"):         block += f"\n  Type: {proj['Project Type']}"
+        if proj.get("Tech Stack"):           block += f"\n  Stack: {proj['Tech Stack']}"
+        if proj.get("Problem/Why Built"):    block += f"\n  Why: {proj['Problem/Why Built']}"
+        if proj.get("Key Actions"):          block += f"\n  Actions: {proj['Key Actions']}"
+        if proj.get("Key Metrics"):          block += f"\n  Metrics: {proj['Key Metrics']}"
+        if proj.get("Relevance Tags"):       block += f"\n  Tags: {proj['Relevance Tags']}"
+        if proj.get("STAR Story"):           block += f"\n  STAR: {proj['STAR Story']}"
+        if proj.get("Can Answer Questions"): block += f"\n  Can Answer: {proj['Can Answer Questions']}"
+        if proj.get("Portfolio Link"):       block += f"\n  Portfolio: {proj['Portfolio Link']}"
+        blocks.append(block)
+    return "\n\n".join(blocks)
+
+
 with tab3:
     if not GROQ_API_KEY:
         st.warning("⚠️ ยังไม่มี `GROQ_API_KEY` ใน Streamlit Secrets ค่ะ")
@@ -3086,131 +3213,6 @@ def _update_matched_resume_relation(job_page_id: str, resume_version_name: str) 
         return False  # ไม่เจอ version นั้นใน DB
     except Exception:
         return False
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def load_resume_versions_cache() -> list:
-    """
-    STEP 0 — ดึง Resume Versions ทั้งหมดจาก Notion สำหรับใช้ใน batch
-    cache 5 นาที — ทำครั้งเดียวต่อ batch แทนที่จะดึงแยกต่อทุกงาน
-    คืน list of dicts: version_id, tone_label, use_when, use_with,
-      summary_paragraph, headline, skills_emphasis, projects_order, canva_link
-    """
-    try:
-        res = requests.post(
-            f"https://api.notion.com/v1/databases/{RESUME_VERSIONS_DB_ID}/query",
-            headers=HEADERS,
-            json={"page_size": 50}
-        )
-        results = res.json().get("results", [])
-        cache = []
-        for page in results:
-            p = page.get("properties", {})
-            def txt(key):
-                arr = (p.get(key) or {}).get("rich_text", [])
-                return arr[0].get("plain_text", "").strip() if arr else ""
-            def sel(key):
-                return ((p.get(key) or {}).get("select") or {}).get("name", "").strip()
-            def ttl(key):
-                arr = (p.get(key) or {}).get("title", [])
-                return arr[0].get("plain_text", "").strip() if arr else ""
-            def url_val(key):
-                return (p.get(key) or {}).get("url", "") or ""
-            vid = ttl("version_id") or txt("version_id")
-            if not vid:
-                continue
-            cache.append({
-                "version_id":        vid,
-                "tone_label":        sel("tone_label") or txt("tone_label"),
-                "use_when":          txt("use_when"),
-                "use_with":          txt("use_with"),
-                "summary_paragraph": txt("summary_paragraph"),
-                "headline":          txt("headline"),
-                "skills_emphasis":   txt("skills_emphasis"),
-                "projects_order":    txt("projects_order"),
-                "canva_link":        url_val("canva_link"),
-            })
-        return cache
-    except Exception as e:
-        return []
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def load_project_details_cache() -> list:
-    """
-    STEP 0 — ดึง Project Details ทั้งหมดจาก Notion สำหรับใช้ใน batch
-    cache 5 นาที — ทำครั้งเดียวต่อ batch
-    คืน list of dicts: Project Name, Project Type, Tech Stack, etc.
-    """
-    try:
-        res = requests.post(
-            f"https://api.notion.com/v1/databases/{PROJECT_DETAILS_DB_ID}/query",
-            headers=HEADERS,
-            json={"page_size": 20}
-        )
-        results = res.json().get("results", [])
-        cache = []
-        for page in results:
-            p = page.get("properties", {})
-            def txt(key):
-                arr = (p.get(key) or {}).get("rich_text", [])
-                return arr[0].get("plain_text", "").strip() if arr else ""
-            def ttl(key):
-                arr = (p.get(key) or {}).get("title", [])
-                return arr[0].get("plain_text", "").strip() if arr else ""
-            name = ttl("Project Name") or txt("Project Name")
-            if not name:
-                continue
-            cache.append({
-                "Project Name":        name,
-                "Project Type":        txt("Project Type"),
-                "Tech Stack":          txt("Tech Stack"),
-                "Problem/Why Built":   txt("Problem/Why Built"),
-                "Key Actions":         txt("Key Actions"),
-                "Key Metrics":         txt("Key Metrics"),
-                "Relevance Tags":      txt("Relevance Tags"),
-                "STAR Story":          txt("STAR Story"),
-                "Can Answer Questions":txt("Can Answer Questions"),
-                "Portfolio Link":      txt("Portfolio Link"),
-            })
-        return cache
-    except Exception as e:
-        return []
-
-
-def _format_resume_versions_cache(cache: list) -> str:
-    """แปลง resume_versions_cache (list of dicts) เป็น string สำหรับ prompt"""
-    if not cache:
-        return "(ไม่พบ Resume Versions ใน cache)"
-    lines = []
-    for v in cache:
-        block = f"VERSION {v['version_id']}"
-        if v.get("tone_label"): block += f" — {v['tone_label']}"
-        if v.get("use_with"):   block += f"\n  ใช้กับ: {v['use_with']}"
-        if v.get("use_when"):   block += f"\n  ใช้เมื่อ: {v['use_when']}"
-        if v.get("skills_emphasis"): block += f"\n  เน้น: {v['skills_emphasis']}"
-        lines.append(block)
-    return "\n\n".join(lines)
-
-
-def _format_project_details_cache(cache: list) -> str:
-    """แปลง project_details_cache (list of dicts) เป็น string สำหรับ prompt"""
-    if not cache:
-        return "(ไม่พบ Project Details ใน cache)"
-    blocks = []
-    for proj in cache:
-        block = f"PROJECT: {proj['Project Name']}"
-        if proj.get("Project Type"):         block += f"\n  Type: {proj['Project Type']}"
-        if proj.get("Tech Stack"):           block += f"\n  Stack: {proj['Tech Stack']}"
-        if proj.get("Problem/Why Built"):    block += f"\n  Why: {proj['Problem/Why Built']}"
-        if proj.get("Key Actions"):          block += f"\n  Actions: {proj['Key Actions']}"
-        if proj.get("Key Metrics"):          block += f"\n  Metrics: {proj['Key Metrics']}"
-        if proj.get("Relevance Tags"):       block += f"\n  Tags: {proj['Relevance Tags']}"
-        if proj.get("STAR Story"):           block += f"\n  STAR: {proj['STAR Story']}"
-        if proj.get("Can Answer Questions"): block += f"\n  Can Answer: {proj['Can Answer Questions']}"
-        if proj.get("Portfolio Link"):       block += f"\n  Portfolio: {proj['Portfolio Link']}"
-        blocks.append(block)
-    return "\n\n".join(blocks)
 
 
 def resume_matching_pipeline(
