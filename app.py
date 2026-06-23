@@ -1009,7 +1009,7 @@ def analysis_to_notion_dicts(a, job_url):
 
 
 # ── Tabs ─────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["📝 Paste Python Dict (Fast)", "✍️ Manual Form", "🤖 Batch Analyze"])
+tab1, tab2, tab3, tab4 = st.tabs(["📝 Paste Python Dict (Fast)", "✍️ Manual Form", "🤖 Batch Analyze", "⚙️ Admin"])
 
 # --- TAB 1 ---
 with tab1:
@@ -2844,6 +2844,7 @@ def _call_gemini_api(system_prompt: str, user_message: str) -> dict:
             "generationConfig": {
                 "maxOutputTokens": 4096,
                 "responseMimeType": "application/json",
+                "thinkingConfig": {"thinkingBudget": 1024},
             },
         },
         timeout=120,
@@ -3380,9 +3381,9 @@ def resume_matching_pipeline(
 
 # ══════════════════════════════════════════════════════════════
 # ADMIN TAB — Backfill + JD Field + Budget
-# (เพิ่มใน tab list หลัก — ต้องเพิ่ม "⚙️ Admin" ใน st.tabs ด้วย)
 # ══════════════════════════════════════════════════════════════
 
+with tab4:
     with st.expander("⚙️ Admin Tools (Developer)", expanded=False):
         st.subheader("ขั้น 1 — Backfill Apply Status ที่ว่าง")
         st.caption("รันครั้งเดียวก่อนเปิดระบบอัตโนมัติ — เติม Apply Status ให้ทุก row ที่ว่างใน Job Pipeline DB")
