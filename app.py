@@ -1482,19 +1482,6 @@ def _extract_text_from_html(html, url):
         return re.sub(r"\n{3,}", "\n\n", text)[:6000]
     return ""
 
-def _fetch_with_jina(url):
-    """Layer 0: Jina AI Reader — ฟรี ไม่ต้อง API key"""
-    try:
-        jina_url = f"https://r.jina.ai/{url}"
-        resp = requests.get(jina_url, timeout=30, headers={"Accept": "text/plain"})
-        resp.raise_for_status()
-        text = resp.text.strip()
-        if len(text) >= 100:
-            return text, None
-        return None, "Jina: content น้อยเกินไป"
-    except Exception as e:
-        return None, f"Jina error: {e}"
-
 
 def _fetch_with_scraperapi(url):
     """Layer 1: ScraperAPI — bypass anti-bot ผ่าน proxy"""
@@ -1582,8 +1569,7 @@ def fetch_jd(url):
     url = _clean_job_url(url)
 
     errors = []
-    # แก้เป็น
-for name, fn in [("Jina", _fetch_with_jina), ("ScraperAPI", _fetch_with_scraperapi), ("requests", _fetch_with_requests)]:
+    for name, fn in [("ScraperAPI", _fetch_with_scraperapi), ("requests", _fetch_with_requests)]:
         text, err = fn(url)
         if text:
             return text, None
