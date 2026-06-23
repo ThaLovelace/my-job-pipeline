@@ -1083,7 +1083,7 @@ with tab1:
                             "parent": {"database_id": RESUME_VERSIONS_DB_ID},
                             "properties": {
                                 "version_id":        {"title": [{"text": {"content": nrv.get("version_id", "")}}]},
-                                "tone_label":        {"select": {"name": nrv.get("tone_label", "General")[:100]}},
+                                "tone_label":        {"rich_text": [{"text": {"content": nrv.get("tone_label", "")[:2000]}}]},
                                 "use_when":          {"rich_text": [{"text": {"content": nrv.get("use_when", "")[:2000]}}]},
                                 "use_with":          {"rich_text": [{"text": {"content": nrv.get("use_with", "")[:2000]}}]},
                                 "summary_paragraph": {"rich_text": [{"text": {"content": nrv.get("summary_paragraph", "")[:2000]}}]},
@@ -3412,7 +3412,7 @@ def resume_matching_pipeline(
                     "parent": {"database_id": RESUME_VERSIONS_DB_ID},
                     "properties": {
                         "version_id":        {"title": [{"text": {"content": nv.get("version_id", "")}}]},
-                        "tone_label":        {"select": {"name": nv.get("tone_label", "General")}},
+                        "tone_label":        {"rich_text": [{"text": {"content": nv.get("tone_label", "")[:2000]}}]},
                         "use_when":          {"rich_text": [{"text": {"content": nv.get("use_when", "")}}]},
                         "use_with":          {"rich_text": [{"text": {"content": nv.get("use_with", "")}}]},
                         "summary_paragraph": {"rich_text": [{"text": {"content": nv.get("summary_paragraph", "")}}]},
