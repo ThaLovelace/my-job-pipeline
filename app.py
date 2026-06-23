@@ -1488,13 +1488,12 @@ def _fetch_with_scraperapi(url):
     if not SCRAPERAPI_KEY:
         return None, "ScraperAPI: ไม่มี key"
     try:
-        proxied = (
-            f"http://api.scraperapi.com"
-            f"?api_key={SCRAPERAPI_KEY}"
-            f"&url={requests.utils.quote(url, safe='')}"
-            f"&render=true"
-        )
-        resp = requests.get(proxied, timeout=60)
+        params = {
+            "api_key": SCRAPERAPI_KEY,
+            "url": url,
+            "render": "true",
+        }
+        resp = requests.get("http://api.scraperapi.com", params=params, timeout=60)
         resp.raise_for_status()
         text = _extract_text_from_html(resp.text, url)
         if len(text.strip()) >= 100:
@@ -1537,15 +1536,37 @@ def _fetch_with_requests(url):
         return None, f"requests error: {e}"
 
 
+def _clean_job_url(url: str) -> str:
+    """ตัด tracking params ออกจาก URL เพื่อให้ ScraperAPI fetch ได้ง่ายขึ้น"""
+    from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+    try:
+        parsed = urlparse(url)
+        # jobsdb: ตัด ?tracking=... ออก เหลือแค่ /job/<id>
+        if "jobsdb.com" in (parsed.hostname or ""):
+            clean = urlunparse(parsed._replace(query="", fragment=""))
+            return clean
+        # jobthai: ตัด query string ที่ไม่จำเป็นออก
+        if "jobthai.com" in (parsed.hostname or ""):
+            clean = urlunparse(parsed._replace(query="", fragment=""))
+            return clean
+    except Exception:
+        pass
+    return url
+
+
 def fetch_jd(url):
     """
     Returns (content, error_message). error_message is None on success.
     ลำดับ: ScraperAPI → requests ธรรมดา
     """
+    # sites ที่ login-wall จริงๆ — ไม่มีทาง fetch ได้เลย
     if "facebook.com" in url:
-        return None, "Facebook URL — กรุณา copy JD มาวางเองค่ะ"
+        return None, "⚠️ Facebook บล็อกการดึงข้อมูล\n👉 กรุณา copy JD มาวางในช่อง 'วาง JD' ด้านล่างค่ะ"
     if "linkedin.com" in url:
-        return None, "LinkedIn URL — กรุณา copy JD มาวางเองค่ะ"
+        return None, "⚠️ LinkedIn บล็อกการดึงข้อมูล\n👉 กรุณา copy JD มาวางในช่อง 'วาง JD' ด้านล่างค่ะ"
+
+    # ตัด tracking params ออกก่อน fetch
+    url = _clean_job_url(url)
 
     errors = []
     for name, fn in [("ScraperAPI", _fetch_with_scraperapi), ("requests", _fetch_with_requests)]:
@@ -1554,7 +1575,17 @@ def fetch_jd(url):
             return text, None
         errors.append(f"{name}: {err}")
 
-    return None, " | ".join(errors)
+    # ถ้า fetch ไม่ได้ → แสดง message ชัดๆ พร้อมบอกให้วาง JD เอง
+    raw_err = " | ".join(errors)
+    if any(site in url for site in ["jobsdb.com", "jobthai.com"]):
+        site_name = "JobsDB" if "jobsdb.com" in url else "JobThai"
+        return None, (
+            f"⚠️ {site_name} ป้องกันการดึงข้อมูลอัตโนมัติในครั้งนี้\n"
+            f"👉 กรุณาเปิด {site_name} → copy ข้อความ JD ทั้งหมด → วางในช่อง 'วาง JD' ด้านล่างค่ะ\n"
+            f"(error: {raw_err})"
+        )
+    return None, raw_err
+
 
 def _trim_prompt(prompt, target_chars):
     """ย่อ prompt โดยตัด section ที่ใหญ่และ optional ก่อน — ไม่ตัดกลางๆ"""
