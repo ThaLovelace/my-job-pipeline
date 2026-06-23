@@ -1016,7 +1016,7 @@ with tab1:
     st.markdown(
         "วางได้ 2 แบบค่ะ:\n"
         "- **ผลลัพธ์ AI analysis (JSON)** ทั้งก้อน — ระบบจะแปลงเป็น job_data/company_data ให้อัตโนมัติ\n"
-        "- **Python dict** ที่มีตัวแปร `job_data` และ `company_data`"
+        "- **Python dict** ที่มีตัวแปร `job_data`, `company_data` (รองรับการสร้าง Resume ใหม่ / Google Sheet อัตโนมัติ)"
     )
     raw_code = st.text_area(
         "Paste Code Here",
@@ -1031,6 +1031,8 @@ with tab1:
             st.stop()
 
         j_data, c_data = None, None
+        new_resume = None
+        gsheet_data = None
         text = raw_code.strip()
 
         # ── ลอง 1: แปะมาเป็น JSON (ผลลัพธ์ AI analysis ทั้งก้อน หรือ {job_data, company_data}) ──
