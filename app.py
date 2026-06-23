@@ -225,12 +225,12 @@ def create_company(d, opt):
 
 # ── Notion page-body block builders ──────────────────────
 
-def _text_chunks(text, size=1999):
-    """แบ่ง text เป็น chunks ตาม Notion rich_text limit (2000 chars/block)"""
+def _text_chunks(text, size=1500):
+    """แบ่ง text เป็น chunks ตาม Notion rich_text limit (เผื่อโควต้า Emoji ไว้ที่ 1500)"""
     text = (text or "").strip()
     return [text[i:i+size] for i in range(0, len(text), size)] or [""]
 
-def _paragraph_blocks(text, size=1999):
+def _paragraph_blocks(text, size=1500):
     return [
         {"object": "block", "type": "paragraph",
          "paragraph": {"rich_text": [{"text": {"content": chunk}}]}}
@@ -255,7 +255,7 @@ def _h3(text):
 
 def _bullet(text):
     return {"object": "block", "type": "bulleted_list_item",
-            "bulleted_list_item": {"rich_text": [{"text": {"content": text[:1999]}}]}}
+            "bulleted_list_item": {"rich_text": [{"text": {"content": text[:1500]}}]}}
 
 def _callout(text, emoji="💡"):
     blocks_out = []
@@ -274,7 +274,7 @@ def _toggle(title, children_blocks):
     return {
         "object": "block", "type": "toggle",
         "toggle": {
-            "rich_text": [{"text": {"content": title[:1999]}}],
+            "rich_text": [{"text": {"content": title[:1500]}}],
             "children": children_blocks,
         }
     }
@@ -455,7 +455,7 @@ def create_job(d, company_page_id, opt):
             "heading_2": {"rich_text": [{"text": {"content": "AI Analysis"}}]}
         })
         text = d["analysis"].strip()
-        for chunk in [text[i:i+1999] for i in range(0, len(text), 1999)]:
+        for chunk in [text[i:i+1500] for i in range(0, len(text), 1500)]:
             children.append({
                 "object": "block", "type": "paragraph",
                 "paragraph": {"rich_text": [{"text": {"content": chunk}}]}
@@ -667,11 +667,11 @@ def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_
         props[company_prop] = {"rich_text": [{"text": {"content": company_name[:200]}}]}
 
     # JD → เขียนทั้ง 2 ที่:
-    #   1. property "JD" (rich_text, ตัด 2000 chars) — ใช้ตอน retry (skip fetch, read jd_text)
-    #   2. page body blocks — ให้คนอ่านสบายตา ไม่ต้องตัด 2000 chars
+    #   1. property "JD" (rich_text, ตัด 1500 chars) — ใช้ตอน retry (skip fetch, read jd_text)
+    #   2. page body blocks — ให้คนอ่านสบายตา ไม่ต้องตัด 1500 chars
     jd_prop = pmap.get("jd")
     if jd_prop and jd_raw:
-        props[jd_prop] = {"rich_text": [{"text": {"content": jd_raw[:2000]}}]}
+        props[jd_prop] = {"rich_text": [{"text": {"content": jd_raw[:1500]}}]}
 
     jd_blocks = []
     if jd_raw:
@@ -679,7 +679,7 @@ def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_
             "object": "block", "type": "heading_3",
             "heading_3": {"rich_text": [{"text": {"content": "📄 Job Description"}}]}
         })
-        for chunk in [jd_raw[i:i+1999] for i in range(0, len(jd_raw), 1999)]:
+        for chunk in [jd_raw[i:i+1500] for i in range(0, len(jd_raw), 1500)]:
             jd_blocks.append({
                 "object": "block", "type": "paragraph",
                 "paragraph": {"rich_text": [{"text": {"content": chunk}}]}
