@@ -225,12 +225,12 @@ def create_company(d, opt):
 
 # ── Notion page-body block builders ──────────────────────
 
-def _text_chunks(text, size=1500):
-    """แบ่ง text เป็น chunks ตาม Notion rich_text limit (เผื่อโควต้า Emoji ไว้ที่ 1500)"""
+def _text_chunks(text, size=1999):
+    """แบ่ง text เป็น chunks ตาม Notion rich_text limit (2000 chars/block)"""
     text = (text or "").strip()
     return [text[i:i+size] for i in range(0, len(text), size)] or [""]
 
-def _paragraph_blocks(text, size=1500):
+def _paragraph_blocks(text, size=1999):
     return [
         {"object": "block", "type": "paragraph",
          "paragraph": {"rich_text": [{"text": {"content": chunk}}]}}
@@ -255,7 +255,7 @@ def _h3(text):
 
 def _bullet(text):
     return {"object": "block", "type": "bulleted_list_item",
-            "bulleted_list_item": {"rich_text": [{"text": {"content": text[:1500]}}]}}
+            "bulleted_list_item": {"rich_text": [{"text": {"content": text[:1999]}}]}}
 
 def _callout(text, emoji="💡"):
     blocks_out = []
@@ -274,7 +274,7 @@ def _toggle(title, children_blocks):
     return {
         "object": "block", "type": "toggle",
         "toggle": {
-            "rich_text": [{"text": {"content": title[:1500]}}],
+            "rich_text": [{"text": {"content": title[:1999]}}],
             "children": children_blocks,
         }
     }
@@ -455,7 +455,7 @@ def create_job(d, company_page_id, opt):
             "heading_2": {"rich_text": [{"text": {"content": "AI Analysis"}}]}
         })
         text = d["analysis"].strip()
-        for chunk in [text[i:i+1500] for i in range(0, len(text), 1500)]:
+        for chunk in [text[i:i+1999] for i in range(0, len(text), 1999)]:
             children.append({
                 "object": "block", "type": "paragraph",
                 "paragraph": {"rich_text": [{"text": {"content": chunk}}]}
@@ -667,11 +667,11 @@ def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_
         props[company_prop] = {"rich_text": [{"text": {"content": company_name[:200]}}]}
 
     # JD → เขียนทั้ง 2 ที่:
-    #   1. property "JD" (rich_text, ตัด 1500 chars) — ใช้ตอน retry (skip fetch, read jd_text)
-    #   2. page body blocks — ให้คนอ่านสบายตา ไม่ต้องตัด 1500 chars
+    #   1. property "JD" (rich_text, ตัด 2000 chars) — ใช้ตอน retry (skip fetch, read jd_text)
+    #   2. page body blocks — ให้คนอ่านสบายตา ไม่ต้องตัด 2000 chars
     jd_prop = pmap.get("jd")
     if jd_prop and jd_raw:
-        props[jd_prop] = {"rich_text": [{"text": {"content": jd_raw[:1500]}}]}
+        props[jd_prop] = {"rich_text": [{"text": {"content": jd_raw[:2000]}}]}
 
     jd_blocks = []
     if jd_raw:
@@ -679,7 +679,7 @@ def upsert_job_listing(url, *, job_title="", company_name="", jd_raw="", status_
             "object": "block", "type": "heading_3",
             "heading_3": {"rich_text": [{"text": {"content": "📄 Job Description"}}]}
         })
-        for chunk in [jd_raw[i:i+1500] for i in range(0, len(jd_raw), 1500)]:
+        for chunk in [jd_raw[i:i+1999] for i in range(0, len(jd_raw), 1999)]:
             jd_blocks.append({
                 "object": "block", "type": "paragraph",
                 "paragraph": {"rich_text": [{"text": {"content": chunk}}]}
@@ -1016,7 +1016,7 @@ with tab1:
     st.markdown(
         "วางได้ 2 แบบค่ะ:\n"
         "- **ผลลัพธ์ AI analysis (JSON)** ทั้งก้อน — ระบบจะแปลงเป็น job_data/company_data ให้อัตโนมัติ\n"
-        "- **Python dict** ที่มีตัวแปร `job_data`, `company_data` (รองรับการสร้าง Resume ใหม่ / Google Sheet อัตโนมัติ)"
+        "- **Python dict** ที่มีตัวแปร `job_data` และ `company_data`"
     )
     raw_code = st.text_area(
         "Paste Code Here",
@@ -1031,8 +1031,6 @@ with tab1:
             st.stop()
 
         j_data, c_data = None, None
-        new_resume = None
-        gsheet_data = None
         text = raw_code.strip()
 
         # ── ลอง 1: แปะมาเป็น JSON (ผลลัพธ์ AI analysis ทั้งก้อน หรือ {job_data, company_data}) ──
@@ -1052,8 +1050,8 @@ with tab1:
             pass
 
         # ── ลอง 2: ถ้ายังไม่ได้ → ลองรันเป็น Python dict (job_data = {...}; company_data = {...}) ──
+        local_vars = {}
         if j_data is None or c_data is None:
-            local_vars = {}
             try:
                 exec(text, {}, local_vars)
                 j_data = local_vars.get("job_data")
@@ -1066,6 +1064,41 @@ with tab1:
             st.error("❌ โค้ดไม่ถูกต้อง: ต้องเป็น JSON ผลลัพธ์ AI analysis, JSON ที่มี job_data/company_data, "
                      "หรือ Python dict ที่มีตัวแปร `job_data` และ `company_data` ค่ะ")
             st.stop()
+
+        # ── ดึง platform จาก google_sheet_data (ถ้ามี) แล้วใส่เข้า job_data ──
+        # รองรับ output format เก่าที่ยังมี google_sheet_data อยู่
+        gsd = local_vars.get("google_sheet_data")
+        if isinstance(gsd, dict) and gsd.get("platform") and not j_data.get("platform"):
+            j_data["platform"] = gsd["platform"]
+
+        # ── new_resume_version_data (Path 3) → สร้างใน Notion Resume Versions DB อัตโนมัติ ──
+        nrv = local_vars.get("new_resume_version_data")
+        if isinstance(nrv, dict) and nrv.get("version_id"):
+            with st.spinner(f"🆕 กำลังสร้าง Resume Version '{nrv.get('version_id')}' ใน Notion..."):
+                try:
+                    nrv_res = requests.post(
+                        "https://api.notion.com/v1/pages",
+                        headers=HEADERS,
+                        json={
+                            "parent": {"database_id": RESUME_VERSIONS_DB_ID},
+                            "properties": {
+                                "version_id":        {"title": [{"text": {"content": nrv.get("version_id", "")}}]},
+                                "tone_label":        {"select": {"name": nrv.get("tone_label", "General")[:100]}},
+                                "use_when":          {"rich_text": [{"text": {"content": nrv.get("use_when", "")[:2000]}}]},
+                                "use_with":          {"rich_text": [{"text": {"content": nrv.get("use_with", "")[:2000]}}]},
+                                "summary_paragraph": {"rich_text": [{"text": {"content": nrv.get("summary_paragraph", "")[:2000]}}]},
+                                "headline":          {"rich_text": [{"text": {"content": nrv.get("headline", "")[:2000]}}]},
+                                "skills_emphasis":   {"rich_text": [{"text": {"content": nrv.get("skills_emphasis", "")[:2000]}}]},
+                                "projects_order":    {"rich_text": [{"text": {"content": str(nrv.get("projects_order", ""))[:2000]}}]},
+                            }
+                        }
+                    )
+                    if "id" in nrv_res.json():
+                        st.success(f"✅ สร้าง Resume Version **{nrv.get('version_id')}** ใน Notion แล้วค่ะ — อย่าลืมสร้าง Canva แล้วใส่ link กลับมานะคะ")
+                    else:
+                        st.warning(f"⚠️ สร้าง Resume Version ไม่สำเร็จ: {nrv_res.json().get('message', 'unknown error')}")
+                except Exception as e:
+                    st.warning(f"⚠️ สร้าง Resume Version ไม่สำเร็จ: {e}")
 
         submit_to_notion(j_data, c_data)
 
@@ -2349,26 +2382,18 @@ with tab3:
                     # มี JD แล้ว (llm_error) หรือยังไม่ push (consider) → skip fetch, run LLM ใหม่
                     skip_fetch = True
                 else:
-                    # status ที่ไม่รู้จัก (fuzzy match ไม่ตรง ฯลฯ) → ถือเป็นงานใหม่
-                    skip_fetch = False
+                    continue  # status ที่ไม่รู้จัก → ข้าม
 
                 # ── URL ──────────────────────────────────────────
                 up = props.get(url_field, {})
                 url = (up.get("url") or "").strip()
+                if not url:
+                    continue
 
                 # ── Name ─────────────────────────────────────────
                 np = props.get(name_field, {})
                 title_arr = np.get("title", [])
-                name = title_arr[0].get("plain_text", "").strip() if title_arr else ""
-
-                # ── Fallback: ถ้า URL ว่าง แต่ Name มีลักษณะเป็น URL → สลับ ──
-                # (เกิดเมื่อบันทึกใส่คอลัม Name แทน URL)
-                if not url and name and (name.startswith("http://") or name.startswith("https://")):
-                    url = name
-                    name = ""  # ไม่มีชื่อจริง ใช้ url[:60] แทนข้างล่าง
-
-                if not url:
-                    continue
+                name = title_arr[0].get("plain_text", "") if title_arr else ""
 
                 # ── JD ───────────────────────────────────────────
                 jp = props.get(jd_field, {})
