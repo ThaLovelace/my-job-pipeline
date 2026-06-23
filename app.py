@@ -1483,6 +1483,20 @@ def _extract_text_from_html(html, url):
     return ""
 
 
+
+def _fetch_with_jina(url):
+    """Layer 0: Jina AI Reader — ฟรี ไม่ต้อง API key"""
+    try:
+        jina_url = f"https://r.jina.ai/{url}"
+        resp = requests.get(jina_url, timeout=30, headers={"Accept": "text/plain"})
+        resp.raise_for_status()
+        text = resp.text.strip()
+        if len(text) >= 100:
+            return text, None
+        return None, "Jina: content น้อยเกินไป"
+    except Exception as e:
+        return None, f"Jina error: {e}"
+
 def _fetch_with_scraperapi(url):
     """Layer 1: ScraperAPI — bypass anti-bot ผ่าน proxy"""
     if not SCRAPERAPI_KEY:
@@ -1569,7 +1583,7 @@ def fetch_jd(url):
     url = _clean_job_url(url)
 
     errors = []
-    for name, fn in [("ScraperAPI", _fetch_with_scraperapi), ("requests", _fetch_with_requests)]:
+    for name, fn in [("Jina", _fetch_with_jina), ("ScraperAPI", _fetch_with_scraperapi), ("requests", _fetch_with_requests)]:
         text, err = fn(url)
         if text:
             return text, None
@@ -2333,18 +2347,26 @@ with tab3:
                     # มี JD แล้ว (llm_error) หรือยังไม่ push (consider) → skip fetch, run LLM ใหม่
                     skip_fetch = True
                 else:
-                    continue  # status ที่ไม่รู้จัก → ข้าม
+                    # status ที่ไม่รู้จัก (fuzzy match ไม่ตรง ฯลฯ) → ถือเป็นงานใหม่
+                    skip_fetch = False
 
                 # ── URL ──────────────────────────────────────────
                 up = props.get(url_field, {})
                 url = (up.get("url") or "").strip()
-                if not url:
-                    continue
 
                 # ── Name ─────────────────────────────────────────
                 np = props.get(name_field, {})
                 title_arr = np.get("title", [])
-                name = title_arr[0].get("plain_text", "") if title_arr else ""
+                name = title_arr[0].get("plain_text", "").strip() if title_arr else ""
+
+                # ── Fallback: ถ้า URL ว่าง แต่ Name มีลักษณะเป็น URL → สลับ ──
+                # (เกิดเมื่อบันทึกใส่คอลัม Name แทน URL)
+                if not url and name and (name.startswith("http://") or name.startswith("https://")):
+                    url = name
+                    name = ""  # ไม่มีชื่อจริง ใช้ url[:60] แทนข้างล่าง
+
+                if not url:
+                    continue
 
                 # ── JD ───────────────────────────────────────────
                 jp = props.get(jd_field, {})
