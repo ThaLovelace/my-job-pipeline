@@ -878,10 +878,10 @@ except Exception as e:
 def submit_to_notion(job_data, company_data):
     if not job_data.get("job_title", "").strip():
         st.error("กรุณาตรวจสอบว่ามี Job Title ค่ะ")
-        return
+        return None
     if not company_data.get("company_name", "").strip():
         st.error("กรุณาตรวจสอบว่ามี Company Name ค่ะ")
-        return
+        return None
 
     log_lines = []
     def log(msg):
@@ -901,14 +901,15 @@ def submit_to_notion(job_data, company_data):
             company_id, err = create_company(company_data, opt)
             if err:
                 st.error(f"❌ สร้างบริษัทไม่สำเร็จ: {err}")
-                return
+                return None
             log(f"✅ สร้างบริษัท {company_name} สำเร็จ")
 
         job_data["company_name"] = company_name
         ok, page_id_or_err = create_job(job_data, company_id, opt)
         if not ok:
             st.error(f"❌ สร้าง job ไม่สำเร็จ: {page_id_or_err}")
-            return
+            return None
+        job_page_id = page_id_or_err
         log(f"✅ เพิ่ม job: {job_title} @ {company_name}")
 
         log("\n📊 Reranking jobs...")
@@ -918,6 +919,8 @@ def submit_to_notion(job_data, company_data):
     st.success("เพิ่มลง Notion สำเร็จแล้วค่ะ! ✨")
     with st.expander("ดู log"):
         st.code("\n".join(log_lines))
+
+    return job_page_id
 
 
 def analysis_to_notion_dicts(a, job_url):
@@ -1072,8 +1075,10 @@ with tab1:
             j_data["platform"] = gsd["platform"]
 
         # ── new_resume_version_data (Path 3) → สร้างใน Notion Resume Versions DB อัตโนมัติ ──
+        # สร้างเฉพาะตอน apply_status = "To Apply" เท่านั้น — ประหยัด API call สำหรับ On Hold / Pass
         nrv = local_vars.get("new_resume_version_data")
-        if isinstance(nrv, dict) and nrv.get("version_id"):
+        is_to_apply = "apply" in str(j_data.get("apply_status", "")).lower()
+        if isinstance(nrv, dict) and nrv.get("version_id") and is_to_apply:
             with st.spinner(f"🆕 กำลังสร้าง Resume Version '{nrv.get('version_id')}' ใน Notion..."):
                 try:
                     nrv_res = requests.post(
@@ -1099,8 +1104,29 @@ with tab1:
                         st.warning(f"⚠️ สร้าง Resume Version ไม่สำเร็จ: {nrv_res.json().get('message', 'unknown error')}")
                 except Exception as e:
                     st.warning(f"⚠️ สร้าง Resume Version ไม่สำเร็จ: {e}")
+        elif isinstance(nrv, dict) and nrv.get("version_id") and not is_to_apply:
+            st.info(f"ℹ️ ข้าม Resume Version '{nrv.get('version_id')}' — สร้างเฉพาะตอน To Apply ค่ะ (สถานะปัจจุบัน: {j_data.get('apply_status', '?')})")
 
-        submit_to_notion(j_data, c_data)
+        job_page_id = submit_to_notion(j_data, c_data)
+
+        # ── Link Matched Resume relation ──
+        # ดึง version_id จาก new_resume_version_data (Path 3) หรือ parse จาก analysis (Path 1/2)
+        resume_version_name = None
+        if isinstance(nrv, dict) and nrv.get("version_id"):
+            resume_version_name = nrv.get("version_id")
+        elif j_data.get("analysis"):
+            # พยายาม parse "Version: Thapanee_XXX" จาก analysis string
+            import re
+            m = re.search(r"Version[:\s]+([A-Za-z0-9_]+)", j_data["analysis"])
+            if m:
+                resume_version_name = m.group(1).strip()
+
+        if job_page_id and resume_version_name:
+            linked = _update_matched_resume_relation(job_page_id, resume_version_name)
+            if linked:
+                st.success(f"🔗 Linked Resume Version **{resume_version_name}** กับงานนี้แล้วค่ะ")
+            else:
+                st.warning(f"⚠️ ไม่พบ Resume Version '{resume_version_name}' ใน Notion — ตรวจสอบชื่อ version_id ด้วยนะคะ")
 
 
 # --- TAB 2 ---
