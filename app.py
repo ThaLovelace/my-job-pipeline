@@ -1011,6 +1011,42 @@ def analysis_to_notion_dicts(a, job_url):
     return job_data, company_data
 
 
+def _update_matched_resume_relation(job_page_id: str, resume_version_name: str) -> bool:
+    """
+    อัปเดต Matched Resume (relation) ใน Job Pipeline
+    ต้องค้นหา page ID ของ Resume Version จาก Resume Versions DB ก่อน
+
+    ⚠️ Known limitation (Bug 4 — ไม่เร่งด่วน):
+    Query ด้วย page_size=50 ครั้งเดียว ไม่ paginate
+    ตอนนี้มี ~10 versions — จะพังเงียบๆ ถ้ามี version เกิน 50 ในอนาคต
+    TODO: เพิ่ม has_more/next_cursor loop ถ้า version เพิ่มมากขึ้น
+    """
+    try:
+        # ค้นหา Resume Version page ที่ชื่อตรงกัน
+        res = requests.post(
+            f"https://api.notion.com/v1/databases/{RESUME_VERSIONS_DB_ID}/query",
+            headers=HEADERS,
+            json={"page_size": 50}
+        )
+        for page in res.json().get("results", []):
+            p = page.get("properties", {})
+            vid_arr = (p.get("version_id") or {}).get("title", [])
+            vid = vid_arr[0].get("plain_text", "").strip() if vid_arr else ""
+            if vid == resume_version_name:
+                resume_page_id = page["id"]
+                # อัปเดต Matched Resume relation
+                patch = requests.patch(
+                    f"https://api.notion.com/v1/pages/{job_page_id}",
+                    headers=HEADERS,
+                    json={"properties": {
+                        "Matched Resume": {"relation": [{"id": resume_page_id}]}
+                    }}
+                )
+                return patch.status_code in (200, 204)
+        return False  # ไม่เจอ version นั้นใน DB
+    except Exception:
+        return False
+
 # ── Tabs ─────────────────────────────────────────────────
 tab1, tab2, tab3, tab4 = st.tabs(["📝 Paste Python Dict (Fast)", "✍️ Manual Form", "🤖 Batch Analyze", "⚙️ Admin"])
 
@@ -3282,43 +3318,6 @@ def _create_application_draft_subpage(job_page_id: str, job_title: str, company_
         }
     )
     return res.status_code in (200, 201), res.json().get("id")
-
-
-def _update_matched_resume_relation(job_page_id: str, resume_version_name: str) -> bool:
-    """
-    อัปเดต Matched Resume (relation) ใน Job Pipeline
-    ต้องค้นหา page ID ของ Resume Version จาก Resume Versions DB ก่อน
-
-    ⚠️ Known limitation (Bug 4 — ไม่เร่งด่วน):
-    Query ด้วย page_size=50 ครั้งเดียว ไม่ paginate
-    ตอนนี้มี ~10 versions — จะพังเงียบๆ ถ้ามี version เกิน 50 ในอนาคต
-    TODO: เพิ่ม has_more/next_cursor loop ถ้า version เพิ่มมากขึ้น
-    """
-    try:
-        # ค้นหา Resume Version page ที่ชื่อตรงกัน
-        res = requests.post(
-            f"https://api.notion.com/v1/databases/{RESUME_VERSIONS_DB_ID}/query",
-            headers=HEADERS,
-            json={"page_size": 50}
-        )
-        for page in res.json().get("results", []):
-            p = page.get("properties", {})
-            vid_arr = (p.get("version_id") or {}).get("title", [])
-            vid = vid_arr[0].get("plain_text", "").strip() if vid_arr else ""
-            if vid == resume_version_name:
-                resume_page_id = page["id"]
-                # อัปเดต Matched Resume relation
-                patch = requests.patch(
-                    f"https://api.notion.com/v1/pages/{job_page_id}",
-                    headers=HEADERS,
-                    json={"properties": {
-                        "Matched Resume": {"relation": [{"id": resume_page_id}]}
-                    }}
-                )
-                return patch.status_code in (200, 204)
-        return False  # ไม่เจอ version นั้นใน DB
-    except Exception:
-        return False
 
 
 def resume_matching_pipeline(
