@@ -448,28 +448,37 @@ def create_job(d, company_page_id, opt):
     if d.get("skill_match_pct") is not None:
         props["Skill Match %"] = {"number": d["skill_match_pct"]}
 
-    children = []
-    if d.get("analysis"):
-        children.append({
-            "object": "block", "type": "heading_2",
-            "heading_2": {"rich_text": [{"text": {"content": "AI Analysis"}}]}
-        })
-        text = d["analysis"].strip()
-        for chunk in [text[i:i+1999] for i in range(0, len(text), 1999)]:
-            children.append({
-                "object": "block", "type": "paragraph",
-                "paragraph": {"rich_text": [{"text": {"content": chunk}}]}
-            })
-
+    # สร้าง page ก่อน (ไม่มี children) เพื่อหลีกเลี่ยง Notion body size limit
+    # แล้วค่อย append analysis blocks แยกทีหลังผ่าน blocks endpoint
     res = requests.post(
         "https://api.notion.com/v1/pages", headers=HEADERS,
-        json={"parent": {"database_id": JOB_PIPELINE_DB_ID}, "properties": props, "children": children}
+        json={"parent": {"database_id": JOB_PIPELINE_DB_ID}, "properties": props}
     )
     result = res.json()
     if "id" not in result:
         return False, result.get("message", "unknown error")
 
     page_id = result["id"]  # เก็บไว้คืนให้ caller ใช้โดยตรง (ไม่ต้อง query เดาจาก title)
+
+    # ── Append analysis blocks แยก request ──────────────────────────────────────
+    if d.get("analysis"):
+        analysis_blocks = [
+            {"object": "block", "type": "heading_2",
+             "heading_2": {"rich_text": [{"text": {"content": "AI Analysis"}}]}}
+        ]
+        text = d["analysis"].strip()
+        for chunk in [text[i:i+1999] for i in range(0, len(text), 1999)]:
+            analysis_blocks.append({
+                "object": "block", "type": "paragraph",
+                "paragraph": {"rich_text": [{"text": {"content": chunk}}]}
+            })
+        # Notion จำกัด 100 blocks ต่อ request — แบ่ง batch ถ้าจำเป็น
+        for i in range(0, len(analysis_blocks), 100):
+            requests.patch(
+                f"https://api.notion.com/v1/blocks/{page_id}/children",
+                headers=HEADERS,
+                json={"children": analysis_blocks[i:i+100]}
+            )
 
     # ── Post-write verification: เช็คว่า Apply Status ไม่ว่าง ──────────────────
     # bug เดิม: sel() silent-skip ถ้า fuzzy_match คืน falsy → Apply Status ว่างเงียบๆ
