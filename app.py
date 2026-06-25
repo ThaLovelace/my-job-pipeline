@@ -15,41 +15,123 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-  [data-testid="stAppViewContainer"] { background: #0f0f11; }
-  [data-testid="stMain"] { background: #0f0f11; }
-  section[data-testid="stSidebar"] { background: #18181c; }
-  h1, h2, h3, label, .stMarkdown p { color: #f0f0f0 !important; }
-  .stTextInput input, .stTextArea textarea, .stNumberInput input {
-      background: #1e1e24 !important;
-      color: #f0f0f0 !important;
-      border: 1px solid #333 !important;
-      border-radius: 8px !important;
+  /* ── Notion-style minimal UI ── */
+
+  /* backgrounds */
+  [data-testid="stAppViewContainer"],
+  [data-testid="stMain"] {
+      background: #ffffff !important;
   }
+  [data-testid="stHeader"] { background: transparent !important; }
+
+  /* typography */
+  h1, h2, h3 {
+      font-weight: 500 !important;
+      letter-spacing: -0.3px !important;
+      color: #1a1a1a !important;
+  }
+  h1 { font-size: 1.4rem !important; }
+  h2 { font-size: 1.05rem !important; }
+  h3 { font-size: 0.95rem !important; }
+  label, .stMarkdown p {
+      color: #3b3b3b !important;
+      font-size: 0.875rem !important;
+  }
+
+  /* tabs */
+  .stTabs [data-baseweb="tab-list"] {
+      gap: 0 !important;
+      border-bottom: 0.5px solid #e5e5e5 !important;
+      background: transparent !important;
+  }
+  .stTabs [data-baseweb="tab"] {
+      font-size: 13px !important;
+      font-weight: 400 !important;
+      color: #888 !important;
+      padding: 0.5rem 1rem !important;
+      border-radius: 0 !important;
+      background: transparent !important;
+  }
+  .stTabs [aria-selected="true"] {
+      color: #1a1a1a !important;
+      font-weight: 500 !important;
+      border-bottom: 2px solid #1a1a1a !important;
+  }
+  .stTabs [data-baseweb="tab-highlight"] { display: none !important; }
+
+  /* inputs */
+  .stTextInput input,
+  .stTextArea textarea,
+  .stNumberInput input {
+      background: #ffffff !important;
+      color: #1a1a1a !important;
+      border: 0.5px solid #d9d9d9 !important;
+      border-radius: 6px !important;
+      font-size: 13px !important;
+      box-shadow: none !important;
+  }
+  .stTextInput input:focus,
+  .stTextArea textarea:focus {
+      border-color: #999 !important;
+      box-shadow: 0 0 0 2px rgba(0,0,0,0.06) !important;
+  }
+  .stTextArea textarea { font-family: monospace !important; line-height: 1.6 !important; }
+
+  /* selectbox */
   .stSelectbox div[data-baseweb="select"] > div {
-      background: #1e1e24 !important;
-      color: #f0f0f0 !important;
-      border: 1px solid #333 !important;
-      border-radius: 8px !important;
+      background: #ffffff !important;
+      color: #1a1a1a !important;
+      border: 0.5px solid #d9d9d9 !important;
+      border-radius: 6px !important;
+      font-size: 13px !important;
   }
+
+  /* buttons */
   .stButton > button {
-      background: #6c63ff !important;
-      color: white !important;
+      background: #1a1a1a !important;
+      color: #ffffff !important;
       border: none !important;
-      border-radius: 8px !important;
-      padding: 0.6rem 2rem !important;
-      font-weight: 600 !important;
-      width: 100%;
+      border-radius: 6px !important;
+      padding: 0.45rem 1.25rem !important;
+      font-size: 13px !important;
+      font-weight: 500 !important;
+      width: auto !important;
+      transition: opacity 0.15s !important;
   }
-  .stButton > button:hover { background: #8a83ff !important; }
+  .stButton > button:hover { opacity: 0.8 !important; }
+
+  /* alerts */
   .stSuccess, .stError, .stInfo, .stWarning {
-      border-radius: 8px !important;
+      border-radius: 6px !important;
+      font-size: 13px !important;
   }
+
+  /* expander */
   div[data-testid="stExpander"] {
-      background: #1e1e24;
-      border: 1px solid #333;
-      border-radius: 10px;
+      background: #fafafa !important;
+      border: 0.5px solid #e5e5e5 !important;
+      border-radius: 8px !important;
+      box-shadow: none !important;
   }
-  hr { border-color: #333; }
+
+  /* divider */
+  hr { border-color: #e5e5e5 !important; }
+
+  /* metrics */
+  [data-testid="stMetric"] {
+      background: #fafafa !important;
+      border: 0.5px solid #e5e5e5 !important;
+      border-radius: 8px !important;
+      padding: 0.75rem 1rem !important;
+  }
+  [data-testid="stMetricLabel"] { font-size: 11px !important; color: #888 !important; }
+  [data-testid="stMetricValue"] { font-size: 1.4rem !important; font-weight: 500 !important; color: #1a1a1a !important; }
+
+  /* code blocks */
+  .stCodeBlock { border-radius: 6px !important; font-size: 12px !important; }
+
+  /* hide streamlit branding */
+  #MainMenu, footer { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -474,11 +556,15 @@ def create_job(d, company_page_id, opt):
             })
         # Notion จำกัด 100 blocks ต่อ request — แบ่ง batch ถ้าจำเป็น
         for i in range(0, len(analysis_blocks), 100):
-            requests.patch(
+            append_res = requests.patch(
                 f"https://api.notion.com/v1/blocks/{page_id}/children",
                 headers=HEADERS,
                 json={"children": analysis_blocks[i:i+100]}
             )
+            if append_res.status_code not in (200, 204):
+                # log ชัดๆ แทนที่จะ silent fail
+                err_msg = append_res.json().get("message", append_res.text[:200])
+                raise Exception(f"Append analysis blocks failed (batch {i//100+1}): {err_msg}")
 
     # ── Post-write verification: เช็คว่า Apply Status ไม่ว่าง ──────────────────
     # bug เดิม: sel() silent-skip ถ้า fuzzy_match คืน falsy → Apply Status ว่างเงียบๆ
@@ -875,8 +961,12 @@ def rerank_all_jobs(opt, log_fn):
         log_fn(f"{emoji} {rank}. {job_name}")
 
 # ── UI ───────────────────────────────────────────────────────
-st.title("🎯 Job Pipeline")
-st.markdown("---")
+st.markdown("""
+<div style="padding: 1.5rem 0 0.25rem;">
+  <p style="font-size:20px; font-weight:500; color:#1a1a1a; letter-spacing:-0.3px; margin:0;">Job pipeline</p>
+  <p style="font-size:13px; color:#888; margin:4px 0 0;">ทับทิม &middot; Thammasat SE &middot; May 2026</p>
+</div>
+""", unsafe_allow_html=True)
 
 try:
     opt = load_options()
@@ -1057,7 +1147,7 @@ def _update_matched_resume_relation(job_page_id: str, resume_version_name: str) 
         return False
 
 # ── Tabs ─────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs(["📝 Paste Python Dict (Fast)", "✍️ Manual Form", "🤖 Batch Analyze", "⚙️ Admin"])
+tab1, tab2, tab3, tab4 = st.tabs(["Paste output", "Manual form", "Batch analyze", "Admin"])
 
 # --- TAB 1 ---
 with tab1:
@@ -1120,11 +1210,11 @@ with tab1:
             j_data["platform"] = gsd["platform"]
 
         # ── new_resume_version_data (Path 3) → สร้างใน Notion Resume Versions DB อัตโนมัติ ──
-        # สร้างเฉพาะตอน apply_status = "To Apply" เท่านั้น — ประหยัด API call สำหรับ On Hold / Pass
+        # สร้าง Resume Version ทุก status — link relation เฉพาะตอน To Apply
         nrv = local_vars.get("new_resume_version_data")
         is_to_apply = "apply" in str(j_data.get("apply_status", "")).lower()
-        if isinstance(nrv, dict) and nrv.get("version_id") and is_to_apply:
-            with st.spinner(f"🆕 กำลังสร้าง Resume Version '{nrv.get('version_id')}' ใน Notion..."):
+        if isinstance(nrv, dict) and nrv.get("version_id"):
+            with st.spinner(f"กำลังสร้าง Resume Version '{nrv.get('version_id')}' ใน Notion..."):
                 try:
                     nrv_res = requests.post(
                         "https://api.notion.com/v1/pages",
@@ -1144,13 +1234,12 @@ with tab1:
                         }
                     )
                     if "id" in nrv_res.json():
-                        st.success(f"✅ สร้าง Resume Version **{nrv.get('version_id')}** ใน Notion แล้วค่ะ — อย่าลืมสร้าง Canva แล้วใส่ link กลับมานะคะ")
+                        note = "" if is_to_apply else " — ยังไม่ link (On Hold/Pass)"
+                        st.success(f"สร้าง Resume Version **{nrv.get('version_id')}** แล้วค่ะ{note}")
                     else:
-                        st.warning(f"⚠️ สร้าง Resume Version ไม่สำเร็จ: {nrv_res.json().get('message', 'unknown error')}")
+                        st.warning(f"สร้าง Resume Version ไม่สำเร็จ: {nrv_res.json().get('message', 'unknown error')}")
                 except Exception as e:
-                    st.warning(f"⚠️ สร้าง Resume Version ไม่สำเร็จ: {e}")
-        elif isinstance(nrv, dict) and nrv.get("version_id") and not is_to_apply:
-            st.info(f"ℹ️ ข้าม Resume Version '{nrv.get('version_id')}' — สร้างเฉพาะตอน To Apply ค่ะ (สถานะปัจจุบัน: {j_data.get('apply_status', '?')})")
+                    st.warning(f"สร้าง Resume Version ไม่สำเร็จ: {e}")
 
         job_page_id = submit_to_notion(j_data, c_data)
 
