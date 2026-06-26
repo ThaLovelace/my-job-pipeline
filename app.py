@@ -549,7 +549,7 @@ def create_job(d, company_page_id, opt):
              "heading_2": {"rich_text": [{"text": {"content": "AI Analysis"}}]}}
         ]
         text = d["analysis"].strip()
-        for chunk in [text[i:i+1999] for i in range(0, len(text), 1999)]:
+        for chunk in [text[i:i+1800] for i in range(0, len(text), 1800)]:
             analysis_blocks.append({
                 "object": "block", "type": "paragraph",
                 "paragraph": {"rich_text": [{"text": {"content": chunk}}]}
