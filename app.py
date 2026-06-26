@@ -562,9 +562,15 @@ def create_job(d, company_page_id, opt):
                 json={"children": analysis_blocks[i:i+100]}
             )
             if append_res.status_code not in (200, 204):
-                # log ชัดๆ แทนที่จะ silent fail
-                err_msg = append_res.json().get("message", append_res.text[:200])
-                raise Exception(f"Append analysis blocks failed (batch {i//100+1}): {err_msg}")
+                try:
+                    err_msg = append_res.json().get("message", append_res.text[:300])
+                except Exception:
+                    err_msg = append_res.text[:300]
+                # ไม่ raise — job ถูกสร้างแล้ว analysis append ล้มเหลวแค่แสดง warning
+                # ส่ง err_msg กลับผ่าน global เพื่อให้ caller แสดง st.warning ได้
+                import builtins
+                builtins._last_analysis_warn = f"Analysis append ล้มเหลว (batch {i//100+1}): {err_msg}"
+                break
 
     # ── Post-write verification: เช็คว่า Apply Status ไม่ว่าง ──────────────────
     # bug เดิม: sel() silent-skip ถ้า fuzzy_match คืน falsy → Apply Status ว่างเงียบๆ
@@ -1010,6 +1016,10 @@ def submit_to_notion(job_data, company_data):
             return None
         job_page_id = page_id_or_err
         log(f"✅ เพิ่ม job: {job_title} @ {company_name}")
+        import builtins
+        if hasattr(builtins, "_last_analysis_warn"):
+            st.warning(f"Job สร้างสำเร็จ แต่ {builtins._last_analysis_warn} — ไปเพิ่ม Analysis ใน Notion เองได้นะคะ")
+            del builtins._last_analysis_warn
 
         log("\n📊 Reranking jobs...")
         rerank_all_jobs(opt, log)
@@ -1210,9 +1220,8 @@ with tab1:
             j_data["platform"] = gsd["platform"]
 
         # ── new_resume_version_data (Path 3) → สร้างใน Notion Resume Versions DB อัตโนมัติ ──
-        # สร้าง Resume Version ทุก status — link relation เฉพาะตอน To Apply
+        # สร้าง Resume Version ทุก status + link relation เสมอถ้ามี new_resume_version_data
         nrv = local_vars.get("new_resume_version_data")
-        is_to_apply = "apply" in str(j_data.get("apply_status", "")).lower()
         if isinstance(nrv, dict) and nrv.get("version_id"):
             with st.spinner(f"กำลังสร้าง Resume Version '{nrv.get('version_id')}' ใน Notion..."):
                 try:
@@ -1234,8 +1243,7 @@ with tab1:
                         }
                     )
                     if "id" in nrv_res.json():
-                        note = "" if is_to_apply else " — ยังไม่ link (On Hold/Pass)"
-                        st.success(f"สร้าง Resume Version **{nrv.get('version_id')}** แล้วค่ะ{note}")
+                        st.success(f"สร้าง Resume Version **{nrv.get('version_id')}** แล้วค่ะ")
                     else:
                         st.warning(f"สร้าง Resume Version ไม่สำเร็จ: {nrv_res.json().get('message', 'unknown error')}")
                 except Exception as e:
@@ -1258,9 +1266,9 @@ with tab1:
         if job_page_id and resume_version_name:
             linked = _update_matched_resume_relation(job_page_id, resume_version_name)
             if linked:
-                st.success(f"🔗 Linked Resume Version **{resume_version_name}** กับงานนี้แล้วค่ะ")
+                st.success(f"Linked Resume Version **{resume_version_name}** กับงานนี้แล้วค่ะ")
             else:
-                st.warning(f"⚠️ ไม่พบ Resume Version '{resume_version_name}' ใน Notion — ตรวจสอบชื่อ version_id ด้วยนะคะ")
+                st.warning(f"ไม่พบ Resume Version '{resume_version_name}' ใน Notion — ตรวจสอบชื่อ version_id ด้วยนะคะ")
 
 
 # --- TAB 2 ---
