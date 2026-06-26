@@ -15,12 +15,40 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-  /* ── Notion-style minimal UI ── */
+  /* ── Notion-style minimal UI — adaptive light/dark ── */
 
-  /* backgrounds */
+  /* CSS variables — light mode defaults */
+  :root {
+    --bg:         #ffffff;
+    --bg-subtle:  #f7f7f7;
+    --border:     #e5e5e5;
+    --text-1:     #1a1a1a;
+    --text-2:     #555555;
+    --text-3:     #999999;
+    --btn-bg:     #1a1a1a;
+    --btn-fg:     #ffffff;
+    --focus-ring: rgba(0,0,0,0.08);
+  }
+
+  /* dark mode overrides */
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:         #191919;
+      --bg-subtle:  #222222;
+      --border:     #333333;
+      --text-1:     #e8e8e8;
+      --text-2:     #aaaaaa;
+      --text-3:     #666666;
+      --btn-bg:     #e8e8e8;
+      --btn-fg:     #191919;
+      --focus-ring: rgba(255,255,255,0.08);
+    }
+  }
+
+  /* base */
   [data-testid="stAppViewContainer"],
   [data-testid="stMain"] {
-      background: #ffffff !important;
+      background: var(--bg) !important;
   }
   [data-testid="stHeader"] { background: transparent !important; }
 
@@ -28,34 +56,35 @@ st.markdown("""
   h1, h2, h3 {
       font-weight: 500 !important;
       letter-spacing: -0.3px !important;
-      color: #1a1a1a !important;
+      color: var(--text-1) !important;
   }
   h1 { font-size: 1.4rem !important; }
   h2 { font-size: 1.05rem !important; }
   h3 { font-size: 0.95rem !important; }
   label, .stMarkdown p {
-      color: #3b3b3b !important;
+      color: var(--text-2) !important;
       font-size: 0.875rem !important;
   }
+  p, li, span { color: var(--text-1) !important; }
 
   /* tabs */
   .stTabs [data-baseweb="tab-list"] {
       gap: 0 !important;
-      border-bottom: 0.5px solid #e5e5e5 !important;
+      border-bottom: 0.5px solid var(--border) !important;
       background: transparent !important;
   }
   .stTabs [data-baseweb="tab"] {
       font-size: 13px !important;
       font-weight: 400 !important;
-      color: #888 !important;
+      color: var(--text-3) !important;
       padding: 0.5rem 1rem !important;
       border-radius: 0 !important;
       background: transparent !important;
   }
   .stTabs [aria-selected="true"] {
-      color: #1a1a1a !important;
+      color: var(--text-1) !important;
       font-weight: 500 !important;
-      border-bottom: 2px solid #1a1a1a !important;
+      border-bottom: 2px solid var(--text-1) !important;
   }
   .stTabs [data-baseweb="tab-highlight"] { display: none !important; }
 
@@ -63,33 +92,33 @@ st.markdown("""
   .stTextInput input,
   .stTextArea textarea,
   .stNumberInput input {
-      background: #ffffff !important;
-      color: #1a1a1a !important;
-      border: 0.5px solid #d9d9d9 !important;
+      background: var(--bg) !important;
+      color: var(--text-1) !important;
+      border: 0.5px solid var(--border) !important;
       border-radius: 6px !important;
       font-size: 13px !important;
       box-shadow: none !important;
   }
   .stTextInput input:focus,
   .stTextArea textarea:focus {
-      border-color: #999 !important;
-      box-shadow: 0 0 0 2px rgba(0,0,0,0.06) !important;
+      border-color: var(--text-3) !important;
+      box-shadow: 0 0 0 2px var(--focus-ring) !important;
   }
   .stTextArea textarea { font-family: monospace !important; line-height: 1.6 !important; }
 
   /* selectbox */
   .stSelectbox div[data-baseweb="select"] > div {
-      background: #ffffff !important;
-      color: #1a1a1a !important;
-      border: 0.5px solid #d9d9d9 !important;
+      background: var(--bg) !important;
+      color: var(--text-1) !important;
+      border: 0.5px solid var(--border) !important;
       border-radius: 6px !important;
       font-size: 13px !important;
   }
 
   /* buttons */
   .stButton > button {
-      background: #1a1a1a !important;
-      color: #ffffff !important;
+      background: var(--btn-bg) !important;
+      color: var(--btn-fg) !important;
       border: none !important;
       border-radius: 6px !important;
       padding: 0.45rem 1.25rem !important;
@@ -98,7 +127,7 @@ st.markdown("""
       width: auto !important;
       transition: opacity 0.15s !important;
   }
-  .stButton > button:hover { opacity: 0.8 !important; }
+  .stButton > button:hover { opacity: 0.75 !important; }
 
   /* alerts */
   .stSuccess, .stError, .stInfo, .stWarning {
@@ -108,24 +137,24 @@ st.markdown("""
 
   /* expander */
   div[data-testid="stExpander"] {
-      background: #fafafa !important;
-      border: 0.5px solid #e5e5e5 !important;
+      background: var(--bg-subtle) !important;
+      border: 0.5px solid var(--border) !important;
       border-radius: 8px !important;
       box-shadow: none !important;
   }
 
   /* divider */
-  hr { border-color: #e5e5e5 !important; }
+  hr { border-color: var(--border) !important; }
 
   /* metrics */
   [data-testid="stMetric"] {
-      background: #fafafa !important;
-      border: 0.5px solid #e5e5e5 !important;
+      background: var(--bg-subtle) !important;
+      border: 0.5px solid var(--border) !important;
       border-radius: 8px !important;
       padding: 0.75rem 1rem !important;
   }
-  [data-testid="stMetricLabel"] { font-size: 11px !important; color: #888 !important; }
-  [data-testid="stMetricValue"] { font-size: 1.4rem !important; font-weight: 500 !important; color: #1a1a1a !important; }
+  [data-testid="stMetricLabel"] { font-size: 11px !important; color: var(--text-3) !important; }
+  [data-testid="stMetricValue"] { font-size: 1.4rem !important; font-weight: 500 !important; color: var(--text-1) !important; }
 
   /* code blocks */
   .stCodeBlock { border-radius: 6px !important; font-size: 12px !important; }
